@@ -15,25 +15,25 @@ pipeline {
             }
         }
 
-        // stage("Docker login") {
-        //     steps {
-        //         echo "🔐 Logging in to DockerHub ..."
-        //         withCredentials([usernamePassword(credentialsId: 'DockerHub-Credentials', usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD')]) {
-        //             sh '''
-        //                 docker login -u $USERNAME -p $PASSWORD
-        //             '''
-        //         }
-        //     }
-        // }
+        stage("Docker login") {
+            steps {
+                echo "🔐 Logging in to DockerHub ..."
+                withCredentials([usernamePassword(credentialsId: 'DockerHub-Credentials', usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD')]) {
+                    sh '''
+                        docker login -u $USERNAME -p $PASSWORD
+                    '''
+                }
+            }
+        }
 
-        // stage("Push Nagios to DockerHub") {
-        //     steps {
-        //         echo "🚀 Pushing Nagios image to DockerHub ..."
-        //         sh '''
-        //             docker push ${IMAGE_NAME}
-        //         '''
-        //     }
-        // }
+        stage("Push Nagios to DockerHub") {
+            steps {
+                echo "🚀 Pushing Nagios image to DockerHub ..."
+                sh '''
+                    docker push ${IMAGE_NAME}
+                '''
+            }
+        }
 
         stage("Deploy Nagios on remote server") {
             agent { label 'remote-docker' }

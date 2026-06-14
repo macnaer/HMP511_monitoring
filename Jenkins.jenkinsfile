@@ -1,0 +1,57 @@
+#!groovy
+
+pipeline {
+    agent any
+
+    environment {
+        IMAGE_NAME = "macnaer/nagios_nmp11"
+    }
+
+    stages {
+        stage("Create Nagios image") {
+            steps {
+                echo '🧱 Building Nagios image ...'
+                sh "docker build --no-cache -t ${IMAGE_NAME} ."
+            }
+        }
+
+        // stage("Docker login") {
+        //     steps {
+        //         echo "🔐 Logging in to DockerHub ..."
+        //         withCredentials([usernamePassword(credentialsId: 'DockerHub-Credentials', usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD')]) {
+        //             sh '''
+        //                 docker login -u $USERNAME -p $PASSWORD
+        //             '''
+        //         }
+        //     }
+        // }
+
+        // stage("Push Nagios to DockerHub") {
+        //     steps {
+        //         echo "🚀 Pushing Nagios image to DockerHub ..."
+        //         sh '''
+        //             docker push ${IMAGE_NAME}
+        //         '''
+        //     }
+        // }
+
+        stage("Deploy Nagios on remote server") {
+            agent { label 'remote-docker' }
+            steps {
+                echo "🌐 Deploying Nagios container on remote server ..."
+                sh '''
+                    echo "🧹 Cleaning up old Nagios container and image..."
+                    docker stop nagios_nmp11 || true
+                    docker rm nagios_nmp11 || true
+                    docker rmi ${IMAGE_NAME} || true
+
+                    echo "⬇️ Pulling latest Nagios image..."
+                    docker pull ${IMAGE_NAME}
+
+                    echo "🚀 Starting new Nagios container..."
+                    docker run -d --name nagios_nmp11   --restart=always -p 0.0.0.0:81:80 -v /opt/monitoring_data_demo:/opt/nagios/data:ro ${IMAGE_NAME}
+                '''
+            }
+        }
+    }
+}

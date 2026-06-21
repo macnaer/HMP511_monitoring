@@ -5,6 +5,8 @@ pipeline {
 
     environment {
         IMAGE_NAME = "macnaer/nagios_nmp11"
+        TELEGRAM_BOT_TOKEN = credentials('HMR_BOT_ID') 
+        TELEGRAM_CHAT_ID   = credentials('HMR_CHAT_ID')
     }
 
     stages {
@@ -51,6 +53,21 @@ pipeline {
                     echo "🚀 Starting new Nagios container..."
                     docker run -d --name nagios_nmp11   --restart=always -p 0.0.0.0:81:80 -v /opt/monitoring_data_demo:/opt/nagios/data:ro ${IMAGE_NAME}
                 '''
+            }
+        }
+    }
+    post {
+        always {
+            script {
+                def message = currentBuild.result == 'SUCCESS' ? 
+                    "✅ Build completed: ${env.JOB_NAME} #${env.BUILD_NUMBER}" : 
+                    "❌ Build failed: ${env.JOB_NAME} #${env.BUILD_NUMBER}"
+
+                sh """
+                    curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                        -d chat_id=${TELEGRAM_CHAT_ID} \
+                        -d text='${message}'
+                """
             }
         }
     }

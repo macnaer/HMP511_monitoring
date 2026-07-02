@@ -1,62 +1,71 @@
 #!/bin/bash
 
+# Скрипт для перевірки відсотка ЗАЙНЯТОГО місця на диску через SNMP (Універсальний: MikroTik, Cisco тощо)
+# Призначення: моніторинг використання дискового простору на віддаленому хості
+#
+# Використання:
+#   ./check_used_space.sh <community> <host> <OID_size> <OID_used> <warning_%> <critical_%>
+#
+# Приклад для Cisco (де індекс флешу, наприклад, 3):
+#   ./check_used_space.sh public 192.168.1.10 1.3.6.1.2.1.25.2.3.1.5.3 1.3.6.1.2.1.25.2.3.1.6.3 80 90
 
+# --- Коди виходу для систем моніторингу (Nagios-сумісні) ---
 OK=0
 WARNING=1
 CRITICAL=2
 UNKNOWN=3
 
+# --- Вхідні параметри ---
 COMMUNITY=$1   # SNMP community string
-HOST=$2        # IP пристрою
-OID_1=$3       # OID для hrStorageSize
-OID_2=$4       # OID для hrStorageUsed
-EDGE_1=$5      # Поріг WARNING
-EDGE_2=$6      # Поріг CRITICAL
+HOST=$2        # IP або хостнейм пристрою
+OID_1=$3       # OID для загального обсягу сховища (hrStorageSize)
+OID_2=$4       # OID для використаного місця (hrStorageUsed)
+EDGE_1=$5      # Поріг WARNING (наприклад, 80)
+EDGE_2=$6      # Поріг CRITICAL (наприклад, 90)
 
+# Перевірка наявності всіх аргументів
 if [ -z "$EDGE_2" ]; then
     echo "UNKNOWN - Missing arguments. Usage: $0 <community> <host> <OID_size> <OID_used> <warning> <critical>"
     exit $UNKNOWN
 fi
 
-# Отримуємо значення через snmpget
-# -m "" вимикає завантаження MIB, а 2>/dev/null повністю відсікає службовий спам утиліти
-STORAGE_SIZE_RAW=$(snmpget -v2c -m "" -c "$COMMUNITY" -Oqv -t 10 "$HOST" "$OID_1" 2>/dev/null)
-STATUS_SIZE=$?
-
-STORAGE_USED_RAW=$(snmpget -v2c -m "" -c "$COMMUNITY" -Oqv -t 10 "$HOST" "$OID_2" 2>/dev/null)
-STATUS_USED=$?
-
-# Перевіряємо статус виконання команд (якщо таймаут або невірний OID)
-if [ $STATUS_SIZE -ne 0 ] || [ -z "$STORAGE_SIZE_RAW" ]; then
-    echo "CRITICAL - SNMP Size query failed (Timeout, wrong OID, or incorrect Community string)"
+# --- Отримуємо загальний обсяг сховища ---
+SNMP_SIZE=$(/usr/bin/snmpwalk -v2c -m "" -c "$COMMUNITY" "$HOST" "$OID_1" | head -n1)
+if [ $? -ne 0 ] || [ -z "$SNMP_SIZE" ]; then
+    echo "CRITICAL - SNMP query failed for total size"
     exit $CRITICAL
 fi
 
-if [ $STATUS_USED -ne 0 ] || [ -z "$STORAGE_USED_RAW" ]; then
-    echo "CRITICAL - SNMP Used query failed (Timeout, wrong OID, or incorrect Community string)"
+# --- Отримуємо використане місце ---
+SNMP_USED=$(/usr/bin/snmpwalk -v2c -m "" -c "$COMMUNITY" "$HOST" "$OID_2" | head -n1)
+if [ $? -ne 0 ] || [ -z "$SNMP_USED" ]; then
+    echo "CRITICAL - SNMP query failed for used space"
     exit $CRITICAL
 fi
 
-# Очищаємо випадкові пробіли або лапки
-STORAGE_SIZE=$(echo "$STORAGE_SIZE_RAW" | tr -d '" ')
-STORAGE_USED=$(echo "$STORAGE_USED_RAW" | tr -d '" ')
+# --- Витягуємо тільки числові значення ---
+STORAGE_SIZE=$(echo "$SNMP_SIZE" | sed -E 's/.*: *([0-9]+)$/\1/')
+STORAGE_USED=$(echo "$SNMP_USED" | sed -E 's/.*: *([0-9]+)$/\1/')
 
-# Перевіряємо, чи є отримані дані чистими числами
+# Перевіряємо коректність значень
 if ! [[ "$STORAGE_SIZE" =~ ^[0-9]+$ && "$STORAGE_USED" =~ ^[0-9]+$ ]]; then
-    echo "UNKNOWN - Raw data is not numeric. Size: '$STORAGE_SIZE', Used: '$STORAGE_USED'"
+    echo "UNKNOWN - Invalid SNMP data format"
     exit $UNKNOWN
 fi
 
+# Захист від ділення на нуль
 if [ "$STORAGE_SIZE" -eq 0 ]; then
     echo "UNKNOWN - Storage size is 0"
     exit $UNKNOWN
 fi
 
-# Розрахунок відсотків зайнятого місця
+# --- Розрахунок зайнятого місця у відсотках (з двома десятковими) ---
 STORAGE_USED_PERCENT=$(echo "scale=2; $STORAGE_USED * 100 / $STORAGE_SIZE" | bc)
+
+# --- Форматуємо відображення (кома замість крапки) ---
 STORAGE_USED_DISPLAY=$(echo "$STORAGE_USED_PERCENT" | sed 's/\./,/')
 
-# Логіка порівняння з порогами thresholds
+# --- Логіка перевірки thresholds ---
 if (( $(echo "$STORAGE_USED_PERCENT > $EDGE_2" | bc -l) )); then
     echo "CRITICAL - Storage usage is ${STORAGE_USED_DISPLAY}%"
     exit $CRITICAL

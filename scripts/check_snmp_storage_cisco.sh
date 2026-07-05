@@ -1,9 +1,11 @@
 #!/bin/bash
 # check_snmp_storage_cisco.sh
-# Cisco storage usage check via SNMP with auto-discovery
+# Cisco flash storage usage check via SNMP
+#
+# Strategy 1: OLD-CISCO-FLASH-MIB scalar OIDs (most Cisco IOS devices)
+# Strategy 2: hrStorageTable auto-discovery (non-Cisco or newer IOS)
 #
 # Usage: check_snmp_storage_cisco.sh <community> <host> <index> <warn> <crit>
-# If index is "auto", discovers storage automatically (any non-memory type).
 # Example: check_snmp_storage_cisco.sh LibreNms 10.7.99.5 auto 80 90
 
 OK=0
@@ -22,86 +24,97 @@ if [ -z "$CRIT" ]; then
     exit $UNKNOWN
 fi
 
-# hrStorage OIDs
-OID_DESCR="1.3.6.1.2.1.25.2.3.1.3"
-OID_SIZE="1.3.6.1.2.1.25.2.3.1.5"
-OID_USED="1.3.6.1.2.1.25.2.3.1.6"
-OID_TYPE="1.3.6.1.2.1.25.2.3.1.2"
+STORAGE_SIZE=""
+STORAGE_USED=""
+DESCR="flash"
 
-# Auto-discover storage index if "auto"
+# ============================================================
+# STRATEGY 1: OLD-CISCO-FLASH-MIB (scalar OIDs)
+#   1.3.6.1.4.1.9.2.10.0 = total flash size (bytes)
+#   1.3.6.1.4.1.9.2.11.0 = available flash (bytes)
+# ============================================================
 if [ "$INDEX" = "auto" ] || [ -z "$INDEX" ]; then
-    # Walk hrStorageType and hrStorageSize to find valid entries
-    TYPE_RAW=$(snmpwalk -v2c -c "$COMMUNITY" -m "" -Oqn -t 30 "$HOST" "$OID_TYPE" 2>/dev/null)
-    SIZE_RAW=$(snmpwalk -v2c -c "$COMMUNITY" -m "" -Oqn -t 30 "$HOST" "$OID_SIZE" 2>/dev/null)
-
-    if [ -z "$TYPE_RAW" ] || [ -z "$SIZE_RAW" ]; then
-        echo "UNKNOWN - SNMP walk failed for hrStorage on ${HOST}"
-        exit $UNKNOWN
-    fi
-
-    # Parse types and sizes, find first entry with size > 0
-    INDEX=""
-    IDX=1
-    while IFS= read -r type_line; do
-        # Get the OID suffix (index) from the type line
-        OID_IDX=$(echo "$type_line" | awk '{print $1}' | awk -F. '{print $NF}')
-        TYPE_VAL=$(echo "$type_line" | awk '{print $2}')
-
-        # Get size for this index
-        SIZE_LINE=$(echo "$SIZE_RAW" | grep "\.${OID_IDX} ")
-        if [ -n "$SIZE_LINE" ]; then
-            SIZE_VAL=$(echo "$SIZE_LINE" | awk '{print $2}')
-            # Skip memory types (1=other, 2=ram, 3=virtualMemory)
-            # Accept anything else with size > 0
-            if [ -n "$SIZE_VAL" ] && [ "$SIZE_VAL" -gt 0 ] 2>/dev/null && \
-               ! echo "$TYPE_VAL" | grep -qE "\.(2|3)$"; then
-                INDEX=$OID_IDX
-                break
+    TOTAL_RAW=$(snmpwalk -v2c -c "$COMMUNITY" -m "" -Oqv -t 30 "$HOST" 1.3.6.1.4.1.9.2.10.0 2>/dev/null)
+    if [ $? -eq 0 ] && [ -n "$TOTAL_RAW" ] && ! echo "$TOTAL_RAW" | grep -qi "no such"; then
+        TOTAL_BYTES=$(echo "$TOTAL_RAW" | tr -d '" ' | head -n1)
+        if [[ "$TOTAL_BYTES" =~ ^[0-9]+$ ]] && [ "$TOTAL_BYTES" -gt 0 ]; then
+            AVAIL_RAW=$(snmpwalk -v2c -c "$COMMUNITY" -m "" -Oqv -t 30 "$HOST" 1.3.6.1.4.1.9.2.11.0 2>/dev/null)
+            if [ $? -eq 0 ] && [ -n "$AVAIL_RAW" ] && ! echo "$AVAIL_RAW" | grep -qi "no such"; then
+                AVAIL_BYTES=$(echo "$AVAIL_RAW" | tr -d '" ' | head -n1)
+                if [[ "$AVAIL_BYTES" =~ ^[0-9]+$ ]]; then
+                    # Values are in bytes, convert to KB for consistency
+                    STORAGE_SIZE=$((TOTAL_BYTES / 1024))
+                    STORAGE_USED=$(( (TOTAL_BYTES - AVAIL_BYTES) / 1024 ))
+                    DESCR="flash"
+                fi
             fi
         fi
-        IDX=$((IDX + 1))
-    done <<< "$TYPE_RAW"
-
-    if [ -z "$INDEX" ]; then
-        echo "UNKNOWN - No usable storage found on ${HOST}"
-        exit $UNKNOWN
     fi
 fi
 
-# Query the discovered/specified index
-OID_SIZE_IDX="${OID_SIZE}.${INDEX}"
-OID_USED_IDX="${OID_USED}.${INDEX}"
-OID_DESCR_IDX="${OID_DESCR}.${INDEX}"
+# ============================================================
+# STRATEGY 2: hrStorageTable (auto-discover any non-memory type)
+# ============================================================
+if [ -z "$STORAGE_SIZE" ]; then
+    OID_DESCR="1.3.6.1.2.1.25.2.3.1.3"
+    OID_SIZE="1.3.6.1.2.1.25.2.3.1.5"
+    OID_USED="1.3.6.1.2.1.25.2.3.1.6"
+    OID_TYPE="1.3.6.1.2.1.25.2.3.1.2"
 
-# Get storage description (for display)
-DESCR_RAW=$(snmpwalk -v2c -c "$COMMUNITY" -m "" -Oqv -t 30 "$HOST" "$OID_DESCR_IDX" 2>/dev/null)
-DESCR=$(echo "$DESCR_RAW" | tr -d '"' | head -n1)
-[ -z "$DESCR" ] && DESCR="storage"
+    if [ "$INDEX" = "auto" ] || [ -z "$INDEX" ]; then
+        TYPE_RAW=$(snmpwalk -v2c -c "$COMMUNITY" -m "" -Oqn -t 30 "$HOST" "$OID_TYPE" 2>/dev/null)
+        SIZE_RAW=$(snmpwalk -v2c -c "$COMMUNITY" -m "" -Oqn -t 30 "$HOST" "$OID_SIZE" 2>/dev/null)
 
-# Get total storage size
-SNMP_SIZE_RAW=$(snmpwalk -v2c -c "$COMMUNITY" -m "" -Oqv -t 30 "$HOST" "$OID_SIZE_IDX" 2>/dev/null)
-if [ $? -ne 0 ] || [ -z "$SNMP_SIZE_RAW" ] || echo "$SNMP_SIZE_RAW" | grep -qi "no such"; then
-    echo "CRITICAL - SNMP query failed for hrStorageSize (index ${INDEX}): ${SNMP_SIZE_RAW}"
-    exit $CRITICAL
+        if [ -n "$TYPE_RAW" ] && [ -n "$SIZE_RAW" ]; then
+            while IFS= read -r type_line; do
+                OID_IDX=$(echo "$type_line" | awk '{print $1}' | awk -F. '{print $NF}')
+                TYPE_VAL=$(echo "$type_line" | awk '{print $2}')
+
+                SIZE_LINE=$(echo "$SIZE_RAW" | grep "\.${OID_IDX} ")
+                if [ -n "$SIZE_LINE" ]; then
+                    SIZE_VAL=$(echo "$SIZE_LINE" | awk '{print $2}')
+                    # Skip memory types (2=ram, 3=virtualMemory)
+                    if [ -n "$SIZE_VAL" ] && [ "$SIZE_VAL" -gt 0 ] 2>/dev/null && \
+                       ! echo "$TYPE_VAL" | grep -qE "\.(2|3)$"; then
+                        INDEX=$OID_IDX
+                        break
+                    fi
+                fi
+            done <<< "$TYPE_RAW"
+        fi
+    fi
+
+    if [ -n "$INDEX" ]; then
+        DESCR_RAW=$(snmpwalk -v2c -c "$COMMUNITY" -m "" -Oqv -t 30 "$HOST" "${OID_DESCR}.${INDEX}" 2>/dev/null)
+        DESCR=$(echo "$DESCR_RAW" | tr -d '"' | head -n1)
+        [ -z "$DESCR" ] && DESCR="storage"
+
+        SNMP_SIZE_RAW=$(snmpwalk -v2c -c "$COMMUNITY" -m "" -Oqv -t 30 "$HOST" "${OID_SIZE}.${INDEX}" 2>/dev/null)
+        if [ $? -eq 0 ] && [ -n "$SNMP_SIZE_RAW" ] && ! echo "$SNMP_SIZE_RAW" | grep -qi "no such"; then
+            STORAGE_SIZE=$(echo "$SNMP_SIZE_RAW" | tr -d '" ' | head -n1)
+            SNMP_USED_RAW=$(snmpwalk -v2c -c "$COMMUNITY" -m "" -Oqv -t 30 "$HOST" "${OID_USED}.${INDEX}" 2>/dev/null)
+            if [ $? -eq 0 ] && [ -n "$SNMP_USED_RAW" ] && ! echo "$SNMP_USED_RAW" | grep -qi "no such"; then
+                STORAGE_USED=$(echo "$SNMP_USED_RAW" | tr -d '" ' | head -n1)
+            fi
+        fi
+    fi
 fi
-STORAGE_SIZE=$(echo "$SNMP_SIZE_RAW" | tr -d '" ' | head -n1)
 
-# Get used storage
-SNMP_USED_RAW=$(snmpwalk -v2c -c "$COMMUNITY" -m "" -Oqv -t 30 "$HOST" "$OID_USED_IDX" 2>/dev/null)
-if [ $? -ne 0 ] || [ -z "$SNMP_USED_RAW" ] || echo "$SNMP_USED_RAW" | grep -qi "no such"; then
-    echo "CRITICAL - SNMP query failed for hrStorageUsed (index ${INDEX}): ${SNMP_USED_RAW}"
-    exit $CRITICAL
+# ============================================================
+# Validate results
+# ============================================================
+if [ -z "$STORAGE_SIZE" ] || [ -z "$STORAGE_USED" ]; then
+    echo "UNKNOWN - No storage found on ${HOST} (neither Cisco flash MIB nor hrStorage)"
+    exit $UNKNOWN
 fi
-STORAGE_USED=$(echo "$SNMP_USED_RAW" | tr -d '" ' | head -n1)
 
-# Validate numeric values
 if ! [[ "$STORAGE_SIZE" =~ ^[0-9]+$ ]]; then
-    echo "UNKNOWN - Invalid storage size: '${STORAGE_SIZE}' (raw: ${SNMP_SIZE_RAW})"
+    echo "UNKNOWN - Invalid storage size: '${STORAGE_SIZE}'"
     exit $UNKNOWN
 fi
 
 if ! [[ "$STORAGE_USED" =~ ^[0-9]+$ ]]; then
-    echo "UNKNOWN - Invalid storage used: '${STORAGE_USED}' (raw: ${SNMP_USED_RAW})"
+    echo "UNKNOWN - Invalid storage used: '${STORAGE_USED}'"
     exit $UNKNOWN
 fi
 

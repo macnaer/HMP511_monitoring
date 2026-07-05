@@ -42,11 +42,11 @@ DESCR="flash"
 #   1.3.6.1.4.1.9.2.11.0 = available flash (bytes)
 # ============================================================
 if [ "$INDEX" = "auto" ] || [ -z "$INDEX" ]; then
-    TOTAL_RAW=$(snmpget -v2c -c "$COMMUNITY" -m "" -Oqv -t 30 "$HOST" 1.3.6.1.4.1.9.2.10.0 2>/dev/null)
+    TOTAL_RAW=$(snmpget -v2c -c "$COMMUNITY" -Oqv -t 30 "$HOST" 1.3.6.1.4.1.9.2.10.0 2>/dev/null)
     if [ $? -eq 0 ] && [ -n "$TOTAL_RAW" ] && ! echo "$TOTAL_RAW" | grep -qi "no such"; then
         TOTAL_BYTES=$(echo "$TOTAL_RAW" | tr -d '" ' | head -n1)
         if [[ "$TOTAL_BYTES" =~ ^[0-9]+$ ]] && [ "$TOTAL_BYTES" -gt 0 ]; then
-            AVAIL_RAW=$(snmpget -v2c -c "$COMMUNITY" -m "" -Oqv -t 30 "$HOST" 1.3.6.1.4.1.9.2.11.0 2>/dev/null)
+            AVAIL_RAW=$(snmpget -v2c -c "$COMMUNITY" -Oqv -t 30 "$HOST" 1.3.6.1.4.1.9.2.11.0 2>/dev/null)
             if [ $? -eq 0 ] && [ -n "$AVAIL_RAW" ] && ! echo "$AVAIL_RAW" | grep -qi "no such"; then
                 AVAIL_BYTES=$(echo "$AVAIL_RAW" | tr -d '" ' | head -n1)
                 if [[ "$AVAIL_BYTES" =~ ^[0-9]+$ ]]; then
@@ -70,8 +70,8 @@ if [ -z "$STORAGE_SIZE" ]; then
     OID_TYPE="1.3.6.1.2.1.25.2.3.1.2"
 
     if [ "$INDEX" = "auto" ] || [ -z "$INDEX" ]; then
-        TYPE_RAW=$(snmpwalk -v2c -c "$COMMUNITY" -m "" -Oqn -t 30 "$HOST" "$OID_TYPE" 2>/dev/null)
-        SIZE_RAW=$(snmpwalk -v2c -c "$COMMUNITY" -m "" -Oqn -t 30 "$HOST" "$OID_SIZE" 2>/dev/null)
+        TYPE_RAW=$(snmpwalk -v2c -c "$COMMUNITY" -Oqn -t 30 "$HOST" "$OID_TYPE" 2>/dev/null)
+        SIZE_RAW=$(snmpwalk -v2c -c "$COMMUNITY" -Oqn -t 30 "$HOST" "$OID_SIZE" 2>/dev/null)
 
         if [ -n "$TYPE_RAW" ] && [ -n "$SIZE_RAW" ]; then
             while IFS= read -r type_line; do
@@ -98,14 +98,14 @@ if [ -z "$STORAGE_SIZE" ]; then
     fi
 
     if [ -n "$INDEX" ]; then
-        DESCR_RAW=$(snmpget -v2c -c "$COMMUNITY" -m "" -Oqv -t 30 "$HOST" "${OID_DESCR}.${INDEX}" 2>/dev/null)
+        DESCR_RAW=$(snmpget -v2c -c "$COMMUNITY" -Oqv -t 30 "$HOST" "${OID_DESCR}.${INDEX}" 2>/dev/null)
         DESCR=$(echo "$DESCR_RAW" | tr -d '"' | head -n1)
         [ -z "$DESCR" ] && DESCR="storage"
 
-        SNMP_SIZE_RAW=$(snmpget -v2c -c "$COMMUNITY" -m "" -Oqv -t 30 "$HOST" "${OID_SIZE}.${INDEX}" 2>/dev/null)
+        SNMP_SIZE_RAW=$(snmpget -v2c -c "$COMMUNITY" -Oqv -t 30 "$HOST" "${OID_SIZE}.${INDEX}" 2>/dev/null)
         if [ $? -eq 0 ] && [ -n "$SNMP_SIZE_RAW" ] && ! echo "$SNMP_SIZE_RAW" | grep -qi "no such"; then
             STORAGE_SIZE=$(echo "$SNMP_SIZE_RAW" | tr -d '" ' | head -n1)
-            SNMP_USED_RAW=$(snmpget -v2c -c "$COMMUNITY" -m "" -Oqv -t 30 "$HOST" "${OID_USED}.${INDEX}" 2>/dev/null)
+            SNMP_USED_RAW=$(snmpget -v2c -c "$COMMUNITY" -Oqv -t 30 "$HOST" "${OID_USED}.${INDEX}" 2>/dev/null)
             if [ $? -eq 0 ] && [ -n "$SNMP_USED_RAW" ] && ! echo "$SNMP_USED_RAW" | grep -qi "no such"; then
                 STORAGE_USED=$(echo "$SNMP_USED_RAW" | tr -d '" ' | head -n1)
             fi
@@ -118,21 +118,50 @@ if [ -z "$STORAGE_SIZE" ]; then
     if [ -z "$STORAGE_SIZE" ]; then
         for TRY_IDX in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
             debug_log "Trying hrStorage index ${TRY_IDX}..."
-            SNMP_SIZE_RAW=$(snmpget -v2c -c "$COMMUNITY" -m "" -Oqv -t 15 "$HOST" "${OID_SIZE}.${TRY_IDX}" 2>/dev/null)
+            SNMP_SIZE_RAW=$(snmpget -v2c -c "$COMMUNITY" -Oqv -t 15 "$HOST" "${OID_SIZE}.${TRY_IDX}" 2>/dev/null)
             if [ $? -eq 0 ] && [ -n "$SNMP_SIZE_RAW" ] && ! echo "$SNMP_SIZE_RAW" | grep -qi "no such"; then
                 SIZE_VAL=$(echo "$SNMP_SIZE_RAW" | tr -d '" ' | head -n1)
                 if [[ "$SIZE_VAL" =~ ^[0-9]+$ ]] && [ "$SIZE_VAL" -gt 0 ]; then
                     INDEX=$TRY_IDX
-                    DESCR_RAW=$(snmpget -v2c -c "$COMMUNITY" -m "" -Oqv -t 15 "$HOST" "${OID_DESCR}.${INDEX}" 2>/dev/null)
+                    DESCR_RAW=$(snmpget -v2c -c "$COMMUNITY" -Oqv -t 15 "$HOST" "${OID_DESCR}.${INDEX}" 2>/dev/null)
                     DESCR=$(echo "$DESCR_RAW" | tr -d '"' | head -n1)
                     [ -z "$DESCR" ] && DESCR="storage"
                     STORAGE_SIZE=$SIZE_VAL
-                    SNMP_USED_RAW=$(snmpget -v2c -c "$COMMUNITY" -m "" -Oqv -t 15 "$HOST" "${OID_USED}.${INDEX}" 2>/dev/null)
+                    SNMP_USED_RAW=$(snmpget -v2c -c "$COMMUNITY" -Oqv -t 15 "$HOST" "${OID_USED}.${INDEX}" 2>/dev/null)
                     if [ $? -eq 0 ] && [ -n "$SNMP_USED_RAW" ] && ! echo "$SNMP_USED_RAW" | grep -qi "no such"; then
                         STORAGE_USED=$(echo "$SNMP_USED_RAW" | tr -d '" ' | head -n1)
                     fi
                     debug_log "Found storage at index ${INDEX}: size=${STORAGE_SIZE}, used=${STORAGE_USED}, descr=${DESCR}"
                     break
+                fi
+            fi
+        done
+    fi
+
+    # ============================================================
+    # STRATEGY 4: CISCO-FLASH-MIB (partition table)
+    #   1.3.6.1.4.1.9.9.10.1.1.4.1.1.4.X = partition size (bytes)
+    #   1.3.6.1.4.1.9.9.10.1.1.4.1.1.5.X = free space (bytes)
+    # ============================================================
+    if [ -z "$STORAGE_SIZE" ]; then
+        for TRY_PART in 1 2 3; do
+            debug_log "Trying CISCO-FLASH-MIB partition ${TRY_PART}..."
+            PART_SIZE=$(snmpget -v2c -c "$COMMUNITY" -Oqv -t 15 "$HOST" "1.3.6.1.4.1.9.9.10.1.1.4.1.1.4.${TRY_PART}" 2>/dev/null)
+            if [ $? -eq 0 ] && [ -n "$PART_SIZE" ] && ! echo "$PART_SIZE" | grep -qi "no such"; then
+                PART_SIZE_VAL=$(echo "$PART_SIZE" | tr -d '" ' | head -n1)
+                if [[ "$PART_SIZE_VAL" =~ ^[0-9]+$ ]] && [ "$PART_SIZE_VAL" -gt 0 ]; then
+                    PART_FREE=$(snmpget -v2c -c "$COMMUNITY" -Oqv -t 15 "$HOST" "1.3.6.1.4.1.9.9.10.1.1.4.1.1.5.${TRY_PART}" 2>/dev/null)
+                    if [ $? -eq 0 ] && [ -n "$PART_FREE" ] && ! echo "$PART_FREE" | grep -qi "no such"; then
+                        PART_FREE_VAL=$(echo "$PART_FREE" | tr -d '" ' | head -n1)
+                        if [[ "$PART_FREE_VAL" =~ ^[0-9]+$ ]]; then
+                            # Values are in bytes, convert to KB
+                            STORAGE_SIZE=$((PART_SIZE_VAL / 1024))
+                            STORAGE_USED=$(( (PART_SIZE_VAL - PART_FREE_VAL) / 1024 ))
+                            DESCR="flash"
+                            debug_log "Found storage via CISCO-FLASH-MIB partition ${TRY_PART}: size=${STORAGE_SIZE}KB, used=${STORAGE_USED}KB"
+                            break
+                        fi
+                    fi
                 fi
             fi
         done

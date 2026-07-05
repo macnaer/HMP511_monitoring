@@ -30,19 +30,35 @@ declare -A SENSORS
 while IFS= read -r line; do
     oid=$(echo "$line" | sed 's/ =.*//')
     val=$(echo "$line" | sed 's/.*= //' | sed 's/"//g' | tr -d ' ')
-    col=$(echo "$oid" | sed -n 's/.*\.1\.1\.1\.\([0-9]\+\).*/\1/p')
-    idx=$(echo "$oid" | sed -n 's/.*\.\([0-9]\+\)$/\1/p')
-    if [ -n "$col" ] && [ -n "$idx" ]; then
-        SENSORS["${idx}_${col}"]=$val
+    if echo "$val" | grep -qiE "NoSuchInstance|NoSuchObject|NoSuchName"; then
+        continue
     fi
-done <<< "$RAW_LINES"
+    [ -n "$index" ] && VALUES[$index]=$val
+done <<< "$VALUE_LINES"
+
+while IFS= read -r line; do
+    index=$(echo "$line" | sed -n 's/.*\.\([0-9]\+\) =.*/\1/p')
+    descr=$(echo "$line" | sed 's/.*= //' | sed 's/"//g')
+    [ -n "$index" ] && DESCRS[$index]=$descr
+done <<< "$DESCR_LINES"
+
+while IFS= read -r line; do
+    index=$(echo "$line" | sed -n 's/.*\.\([0-9]\+\) =.*/\1/p')
+    alarm=$(echo "$line" | sed 's/.*= //' | tr -d ' ')
+    [ -n "$index" ] && ALARMS[$index]=$alarm
+done <<< "$ALARM_LINES"
 
 OVERALL_STATUS=0
 OVERALL_OUTPUT=""
 
-for idx in $(echo "${!SENSORS[@]}" | tr ' ' '\n' | sed 's/_.*//' | sort -nu); do
-    sclass="${SENSORS[${idx}_1]}"
-    stype="${SENSORS[${idx}_2]}"
+for idx in $(echo "${!VALUES[@]}" | tr ' ' '\n' | sort -n); do
+    [ -z "${DESCRS[$idx]}" ] && continue
+
+    TEMP_RAW="${VALUES[$idx]}"
+    DESCR="${DESCRS[$idx]}"
+    ALARM="${ALARMS[$idx]:-1}"
+
+    TEMP_RAW=$(echo "$TEMP_RAW" | sed 's/"//g' | tr -d ' ')
 
     if [ "$sclass" != "$SENSOR_CLASS_TEMPERATURE" ] && [ "$stype" != "$SENSOR_TYPE_CELSIUS" ]; then
         continue

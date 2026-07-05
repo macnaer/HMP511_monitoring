@@ -19,7 +19,7 @@ HOST=$1
 WARN=$2
 CRIT=$3
 
-SSH_USER="admin"
+SSH_USER="test"
 SSH_PASS="Qwerty-1"
 
 if [ -z "$CRIT" ]; then

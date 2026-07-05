@@ -24,6 +24,14 @@ if [ -z "$CRIT" ]; then
     exit $UNKNOWN
 fi
 
+DEBUG=${DEBUG:-0}
+
+debug_log() {
+    if [ "$DEBUG" = "1" ]; then
+        echo "DEBUG: $*" >&2
+    fi
+}
+
 STORAGE_SIZE=""
 STORAGE_USED=""
 DESCR="flash"
@@ -84,6 +92,11 @@ if [ -z "$STORAGE_SIZE" ]; then
         fi
     fi
 
+    # Auto-discovery didn't find a valid entry, reset INDEX
+    if [ "$INDEX" = "auto" ]; then
+        INDEX=""
+    fi
+
     if [ -n "$INDEX" ]; then
         DESCR_RAW=$(snmpwalk -v2c -c "$COMMUNITY" -m "" -Oqv -t 30 "$HOST" "${OID_DESCR}.${INDEX}" 2>/dev/null)
         DESCR=$(echo "$DESCR_RAW" | tr -d '"' | head -n1)
@@ -97,6 +110,32 @@ if [ -z "$STORAGE_SIZE" ]; then
                 STORAGE_USED=$(echo "$SNMP_USED_RAW" | tr -d '" ' | head -n1)
             fi
         fi
+    fi
+
+    # ============================================================
+    # STRATEGY 3: brute-force common hrStorage indexes
+    # ============================================================
+    if [ -z "$STORAGE_SIZE" ]; then
+        for TRY_IDX in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+            debug_log "Trying hrStorage index ${TRY_IDX}..."
+            SNMP_SIZE_RAW=$(snmpwalk -v2c -c "$COMMUNITY" -m "" -Oqv -t 15 "$HOST" "${OID_SIZE}.${TRY_IDX}" 2>/dev/null)
+            if [ $? -eq 0 ] && [ -n "$SNMP_SIZE_RAW" ] && ! echo "$SNMP_SIZE_RAW" | grep -qi "no such"; then
+                SIZE_VAL=$(echo "$SNMP_SIZE_RAW" | tr -d '" ' | head -n1)
+                if [[ "$SIZE_VAL" =~ ^[0-9]+$ ]] && [ "$SIZE_VAL" -gt 0 ]; then
+                    INDEX=$TRY_IDX
+                    DESCR_RAW=$(snmpwalk -v2c -c "$COMMUNITY" -m "" -Oqv -t 15 "$HOST" "${OID_DESCR}.${INDEX}" 2>/dev/null)
+                    DESCR=$(echo "$DESCR_RAW" | tr -d '"' | head -n1)
+                    [ -z "$DESCR" ] && DESCR="storage"
+                    STORAGE_SIZE=$SIZE_VAL
+                    SNMP_USED_RAW=$(snmpwalk -v2c -c "$COMMUNITY" -m "" -Oqv -t 15 "$HOST" "${OID_USED}.${INDEX}" 2>/dev/null)
+                    if [ $? -eq 0 ] && [ -n "$SNMP_USED_RAW" ] && ! echo "$SNMP_USED_RAW" | grep -qi "no such"; then
+                        STORAGE_USED=$(echo "$SNMP_USED_RAW" | tr -d '" ' | head -n1)
+                    fi
+                    debug_log "Found storage at index ${INDEX}: size=${STORAGE_SIZE}, used=${STORAGE_USED}, descr=${DESCR}"
+                    break
+                fi
+            fi
+        done
     fi
 fi
 

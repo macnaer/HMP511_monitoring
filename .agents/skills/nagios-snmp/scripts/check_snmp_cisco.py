@@ -114,15 +114,16 @@ def snmp_get(host: str, oid: str, community: str, version: str, timeout: int) ->
 def check_temperature(host: str, community: str, version: str, timeout: int,
                       warn: float, crit: float) -> tuple[int, str]:
     """Check Cisco system temperature."""
-    # Check alarm status first
+     # Check alarm status first (1=normal, 2=warning, 3=critical)
     exit_code, value = snmp_get(host, CISCO_OIDS["temp_alarm"], community, version, timeout)
     if exit_code == OK:
         try:
             alarm = int(value)
-            if alarm == 1:  # Temperature alarm
-                return CRITICAL, "Temperature alarm active"
+            if alarm >= 2:
+                return CRITICAL, f"Temperature alarm active (status: {alarm})"
         except (ValueError, TypeError):
             pass
+
 
     # Get temperature value
     exit_code, value = snmp_get(host, CISCO_OIDS["temp_value"], community, version, timeout)
@@ -130,15 +131,16 @@ def check_temperature(host: str, community: str, version: str, timeout: int,
         return UNKNOWN, "Cannot query temperature OID"
 
     try:
-        temp = int(value)
-        if warn is not None and crit is not None:
-            if temp >= crit:
-                return CRITICAL, f"Temperature: {temp}C (>={crit}C)"
-            elif temp >= warn:
-                return WARNING, f"Temperature: {temp}C (>={warn}C)"
-        return OK, f"Temperature: {temp}C"
-    except (ValueError, TypeError):
-        return UNKNOWN, f"Invalid temperature value: {value}"
+         temp_milli = int(value)
+    temp_c = temp_milli / 1000.0
+    if warn is not None and crit is not None:
+        if temp_c >= crit:
+            return CRITICAL, f"Temperature: {temp_c:.1f}C (>={crit}C)"
+        elif temp_c >= warn:
+            return WARNING, f"Temperature: {temp_c:.1f}C (>={warn}C)"
+    return OK, f"Temperature: {temp_c:.1f}C"
+except (ValueError, TypeError):
+    return UNKNOWN, f"Invalid temperature value: {value}"
 
 
 def check_fan(host: str, community: str, version: str, timeout: int) -> tuple[int, str]:

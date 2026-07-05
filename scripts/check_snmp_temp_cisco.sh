@@ -28,6 +28,9 @@ declare -A VALUES DESCRS ALARMS
 while IFS= read -r line; do
     index=$(echo "$line" | sed -n 's/.*\.\([0-9]\+\) =.*/\1/p')
     val=$(echo "$line" | sed 's/.*= //' | sed 's/"//g' | tr -d ' ')
+    if echo "$val" | grep -qiE "NoSuchInstance|NoSuchObject|NoSuchName"; then
+        continue
+    fi
     [ -n "$index" ] && VALUES[$index]=$val
 done <<< "$VALUE_LINES"
 
@@ -47,8 +50,10 @@ OVERALL_STATUS=0
 OVERALL_OUTPUT=""
 
 for idx in $(echo "${!VALUES[@]}" | tr ' ' '\n' | sort -n); do
+    [ -z "${DESCRS[$idx]}" ] && continue
+
     TEMP_RAW="${VALUES[$idx]}"
-    DESCR="${DESCRS[$idx]:-Sensor $idx}"
+    DESCR="${DESCRS[$idx]}"
     ALARM="${ALARMS[$idx]:-1}"
 
     TEMP_RAW=$(echo "$TEMP_RAW" | sed 's/"//g' | tr -d ' ')

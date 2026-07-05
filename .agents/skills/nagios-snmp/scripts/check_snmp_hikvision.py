@@ -153,8 +153,8 @@ def main():
     parser.add_argument("--host", required=True, help="Target host IP or hostname")
     parser.add_argument("--check", required=True, choices=["uptime", "temperature", "storage", "time"],
                         help="Check type to perform")
-    parser.add_argument("--warn", type=float, default=None, help="Warning threshold")
-    parser.add_argument("--crit", type=float, default=None, help="Critical threshold")
+    parser.add_argument("--warn", type=float, nargs='?', const=None, default=None, help="Warning threshold")
+    parser.add_argument("--crit", type=float, nargs='?', const=None, default=None, help="Critical threshold")
     parser.add_argument("--community", default=os.environ.get("NAGIOS_SNMP_COMMUNITY", "public"),
                         help="SNMP community string")
     parser.add_argument("--version", default=os.environ.get("NAGIOS_SNMP_VERSION", "2c"),

@@ -2,7 +2,7 @@
 """Cisco storage usage check via SNMP.
 
 Queries hrStorageSize and hrStorageUsed to calculate disk usage percentage.
-Uses snmpget via subprocess (no pysnmp dependency).
+Uses snmpwalk via subprocess (no pysnmp dependency).
 
 Thresholds (used space):
   OK:       < warn%
@@ -14,6 +14,7 @@ Usage:
 """
 
 import argparse
+import re
 import subprocess
 import sys
 
@@ -26,19 +27,45 @@ HR_STORAGE_SIZE = "1.3.6.1.2.1.25.2.3.1.5"
 HR_STORAGE_USED = "1.3.6.1.2.1.25.2.3.1.6"
 
 
-def snmp_get(host, community, oid, timeout=30):
-    """Perform an SNMP GET via snmpget and return the integer value, or None on failure."""
+def snmp_walk_get(community, host, oid, index, timeout=30):
+    """Walk an SNMP OID and return the value for a specific index, or None on failure."""
     try:
+        full_oid = "{}.{}".format(oid, index)
         result = subprocess.run(
-            ["snmpget", "-v2c", "-c", community, "-Oqv", "-t", str(timeout), host, oid],
+            ["snmpwalk", "-v2c", "-c", community, "-Oqv", "-t", str(timeout), host, full_oid],
             capture_output=True, text=True, timeout=timeout + 5
         )
         if result.returncode != 0:
             return None
         value = result.stdout.strip().strip('"').strip()
+        if not value or value == "No Such Object available on this agent at this OID":
+            return None
         return int(value)
     except (subprocess.TimeoutExpired, ValueError, FileNotFoundError):
         return None
+
+
+def snmp_walk_table(community, host, oid, timeout=30):
+    """Walk an SNMP OID table and return a dict of {index: value}."""
+    results = {}
+    try:
+        result = subprocess.run(
+            ["snmpwalk", "-v2c", "-c", community, "-Oqv", "-t", str(timeout), host, oid],
+            capture_output=True, text=True, timeout=timeout + 5
+        )
+        if result.returncode != 0:
+            return results
+        for line in result.stdout.strip().splitlines():
+            line = line.strip().strip('"').strip()
+            if not line or "No Such Object" in line:
+                continue
+            try:
+                results[len(results) + 1] = int(line)
+            except ValueError:
+                pass
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    return results
 
 
 def format_bytes(kb):
@@ -60,17 +87,32 @@ def main():
     parser.add_argument("--timeout", type=int, default=30, help="SNMP timeout in seconds")
     args = parser.parse_args()
 
-    oid_size = "{}.{}".format(HR_STORAGE_SIZE, args.index)
-    oid_used = "{}.{}".format(HR_STORAGE_USED, args.index)
+    # Try direct index first
+    total_kb = snmp_walk_get(args.community, args.host, HR_STORAGE_SIZE, args.index, args.timeout)
 
-    total_kb = snmp_get(args.host, args.community, oid_size, args.timeout)
+    # If direct index fails, walk the table and try to find a valid entry
     if total_kb is None:
-        print("CRITICAL - SNMP query failed for hrStorageSize")
-        sys.exit(EXIT_CRITICAL)
+        size_table = snmp_walk_table(args.community, args.host, HR_STORAGE_SIZE, args.timeout)
+        used_table = snmp_walk_table(args.community, args.host, HR_STORAGE_USED, args.timeout)
 
-    used_kb = snmp_get(args.host, args.community, oid_used, args.timeout)
-    if used_kb is None:
-        print("CRITICAL - SNMP query failed for hrStorageUsed")
+        if args.index in size_table and args.index in used_table:
+            total_kb = size_table[args.index]
+            used_kb = used_table[args.index]
+        elif size_table and used_table:
+            # Use the first index that has both size and used values
+            for idx in size_table:
+                if idx in used_table and size_table[idx] > 0:
+                    total_kb = size_table[idx]
+                    used_kb = used_table[idx]
+                    break
+        else:
+            total_kb = None
+            used_kb = None
+    else:
+        used_kb = snmp_walk_get(args.community, args.host, HR_STORAGE_USED, args.index, args.timeout)
+
+    if total_kb is None or used_kb is None:
+        print("CRITICAL - SNMP query failed for hrStorageSize/hrStorageUsed")
         sys.exit(EXIT_CRITICAL)
 
     if total_kb == 0:

@@ -1,7 +1,7 @@
 #!/bin/bash
 # check_snmp_temp_cisco.sh
 # Перевіряє температуру Cisco комутатора через SNMP
-# Використовує ciscoEnvMonTemperatureStatusTable (1.3.6.1.4.1.9.9.13.1.3.1)
+# Використовує IETF ENTITY-SENSOR-MIB (1.3.6.1.2.1.99.1.1.1)
 # Виклик: check_snmp_temp_cisco.sh <host> <community> <warn> <crit>
 
 HOST=$1
@@ -10,65 +10,69 @@ WARN=$3
 CRIT=$4
 TIMEOUT=${5:-30}
 
-OID_TEMP_DESCR="1.3.6.1.4.1.9.9.13.1.3.1.2"
-OID_TEMP_VALUE="1.3.6.1.4.1.9.9.13.1.3.1.3"
-OID_TEMP_ALARM="1.3.6.1.4.1.9.9.13.1.3.1.4"
+OID_ENTITY_SENSOR="1.3.6.1.2.1.99.1.1.1"
 
-VALUE_LINES=$(snmpwalk -v2c -c "$COMMUNITY" -On -t "$TIMEOUT" "$HOST" "$OID_TEMP_VALUE" 2>/dev/null)
-if [ $? -ne 0 ] || [ -z "$VALUE_LINES" ]; then
-    echo "CRITICAL - SNMP query failed for temperature table"
+RAW_LINES=$(snmpwalk -v2c -c "$COMMUNITY" -On -t "$TIMEOUT" "$HOST" "$OID_ENTITY_SENSOR" 2>/dev/null)
+if [ $? -ne 0 ] || [ -z "$RAW_LINES" ]; then
+    echo "CRITICAL - SNMP query failed for ENTITY-SENSOR-MIB"
     exit 2
 fi
 
-DESCR_LINES=$(snmpwalk -v2c -c "$COMMUNITY" -On -t "$TIMEOUT" "$HOST" "$OID_TEMP_DESCR" 2>/dev/null)
-ALARM_LINES=$(snmpwalk -v2c -c "$COMMUNITY" -On -t "$TIMEOUT" "$HOST" "$OID_TEMP_ALARM" 2>/dev/null)
+SENSOR_CLASS_TEMPERATURE=9
+SENSOR_TYPE_CELSIUS=8
+SCALE_UNITS=9
+SCALE_MILLI=10
+SCALE_MICRO=11
+INVALID_VALUE=-1000000000
 
-declare -A VALUES DESCRS ALARMS
+declare -A SENSORS
 
 while IFS= read -r line; do
-    index=$(echo "$line" | sed -n 's/.*\.\([0-9]\+\) =.*/\1/p')
+    oid=$(echo "$line" | sed 's/ =.*//')
     val=$(echo "$line" | sed 's/.*= //' | sed 's/"//g' | tr -d ' ')
-    [ -n "$index" ] && VALUES[$index]=$val
-done <<< "$VALUE_LINES"
-
-while IFS= read -r line; do
-    index=$(echo "$line" | sed -n 's/.*\.\([0-9]\+\) =.*/\1/p')
-    descr=$(echo "$line" | sed 's/.*= //' | sed 's/"//g')
-    [ -n "$index" ] && DESCRS[$index]=$descr
-done <<< "$DESCR_LINES"
-
-while IFS= read -r line; do
-    index=$(echo "$line" | sed -n 's/.*\.\([0-9]\+\) =.*/\1/p')
-    alarm=$(echo "$line" | sed 's/.*= //' | tr -d ' ')
-    [ -n "$index" ] && ALARMS[$index]=$alarm
-done <<< "$ALARM_LINES"
+    col=$(echo "$oid" | sed -n 's/.*\.1\.1\.1\.\([0-9]\+\).*/\1/p')
+    idx=$(echo "$oid" | sed -n 's/.*\.\([0-9]\+\)$/\1/p')
+    if [ -n "$col" ] && [ -n "$idx" ]; then
+        SENSORS["${idx}_${col}"]=$val
+    fi
+done <<< "$RAW_LINES"
 
 OVERALL_STATUS=0
 OVERALL_OUTPUT=""
 
-for idx in $(echo "${!VALUES[@]}" | tr ' ' '\n' | sort -n); do
-    TEMP_RAW="${VALUES[$idx]}"
-    DESCR="${DESCRS[$idx]:-Sensor $idx}"
-    ALARM="${ALARMS[$idx]:-1}"
+for idx in $(echo "${!SENSORS[@]}" | tr ' ' '\n' | sed 's/_.*//' | sort -nu); do
+    sclass="${SENSORS[${idx}_1]}"
+    stype="${SENSORS[${idx}_2]}"
 
-    TEMP_RAW=$(echo "$TEMP_RAW" | sed 's/"//g' | tr -d ' ')
-
-    if [ "$TEMP_RAW" -gt 1000 ] 2>/dev/null; then
-        TEMP_C=$(echo "scale=1; $TEMP_RAW / 1000" | bc 2>/dev/null || python3 -c "print(round($TEMP_RAW / 1000.0, 1))" 2>/dev/null)
-    else
-        TEMP_C="$TEMP_RAW"
-    fi
-
-    if [ -z "$TEMP_C" ]; then
+    if [ "$sclass" != "$SENSOR_CLASS_TEMPERATURE" ] && [ "$stype" != "$SENSOR_TYPE_CELSIUS" ]; then
         continue
     fi
 
+    svalue="${SENSORS[${idx}_4]}"
+    sprecision="${SENSORS[${idx}_3]:-0}"
+    sscale="${SENSORS[${idx}_5]:-$SCALE_UNITS}"
+    soper="${SENSORS[${idx}_8]:-1}"
+
+    if [ "$svalue" = "$INVALID_VALUE" ] || [ "$soper" != "1" ]; then
+        continue
+    fi
+
+    divisor=1
+    for ((i=0; i<sprecision; i++)); do
+        divisor=$((divisor * 10))
+    done
+
+    scale_factor=1
+    if [ "$sscale" = "$SCALE_MILLI" ]; then
+        scale_factor=1000
+    elif [ "$sscale" = "$SCALE_MICRO" ]; then
+        scale_factor=1000000
+    fi
+
+    TEMP_C=$(echo "scale=2; $svalue / $divisor / $scale_factor" | bc -l 2>/dev/null || python3 -c "print(round($svalue / $divisor / $scale_factor, 1))" 2>/dev/null)
+
     STATUS=0
-    if [ -n "$ALARM" ] && [ "$ALARM" -ge 3 ] 2>/dev/null; then
-        STATUS=2
-    elif [ -n "$ALARM" ] && [ "$ALARM" -ge 2 ] 2>/dev/null; then
-        STATUS=1
-    elif [ -n "$CRIT" ] && [ "$CRIT" != "none" ] && [ "$(echo "$TEMP_C >= $CRIT" | bc -l 2>/dev/null)" = "1" ]; then
+    if [ -n "$CRIT" ] && [ "$CRIT" != "none" ] && [ "$(echo "$TEMP_C >= $CRIT" | bc -l 2>/dev/null)" = "1" ]; then
         STATUS=2
     elif [ -n "$WARN" ] && [ "$WARN" != "none" ] && [ "$(echo "$TEMP_C >= $WARN" | bc -l 2>/dev/null)" = "1" ]; then
         STATUS=1
@@ -80,7 +84,7 @@ for idx in $(echo "${!VALUES[@]}" | tr ' ' '\n' | sort -n); do
     fi
 
     [ -n "$OVERALL_OUTPUT" ] && OVERALL_OUTPUT="$OVERALL_OUTPUT, "
-    OVERALL_OUTPUT="${OVERALL_OUTPUT}${DESCR} ${TEMP_C}°C (${STATUS_NAME})"
+    OVERALL_OUTPUT="${OVERALL_OUTPUT}Sensor ${idx} ${TEMP_C}°C (${STATUS_NAME})"
 
     if [ "$STATUS" -gt "$OVERALL_STATUS" ]; then
         OVERALL_STATUS=$STATUS

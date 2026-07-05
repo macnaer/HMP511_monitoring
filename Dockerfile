@@ -1,9 +1,29 @@
 FROM jasonrivers/nagios:latest
 
+# Install Python 3 and dependencies for custom checks
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python packages for Nagios checks
+RUN pip3 install --break-system-packages \
+    pysnmp>=6.0.0 \
+    psutil>=5.9.0
+
+# Copy Nagios configuration
 COPY nagios.cfg /opt/nagios/etc/nagios.cfg
 COPY objects/ /opt/nagios/etc/objects/
-COPY scripts/ /opt/nagios/etc/scripts/
 
-RUN chown -R nagios:nagios /opt/nagios/etc && chmod +x /opt/nagios/etc/scripts/*.sh
+# Copy custom scripts (bash + Python)
+COPY scripts/ /opt/nagios/etc/scripts/
+COPY .agents/skills/nagios-snmp/scripts/*.py /opt/nagios/etc/scripts/
+COPY .agents/skills/nagios-system/scripts/*.py /opt/nagios/etc/scripts/
+COPY .agents/skills/nagios-network/scripts/*.py /opt/nagios/etc/scripts/
+
+# Set permissions
+RUN chown -R nagios:nagios /opt/nagios/etc \
+    && chmod +x /opt/nagios/etc/scripts/*.sh \
+    && chmod +x /opt/nagios/etc/scripts/*.py
 
 EXPOSE 81

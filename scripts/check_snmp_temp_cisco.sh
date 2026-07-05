@@ -19,7 +19,14 @@ if [ $? -ne 0 ]; then
 fi
 
 TEMP_RAW=$(echo "$TEMP_RAW" | sed 's/"//g' | tr -d ' ')
-TEMP_C=$(echo "scale=1; $TEMP_RAW / 1000" | bc 2>/dev/null || python3 -c "print(round($TEMP_RAW / 1000.0, 1))" 2>/dev/null)
+
+# На Catalyst 2960G OID повертає °C напряму (напр. 42).
+# Якщо значення > 1000 — це міліградуси, ділимо на 1000.
+if [ "$TEMP_RAW" -gt 1000 ] 2>/dev/null; then
+    TEMP_C=$(echo "scale=1; $TEMP_RAW / 1000" | bc 2>/dev/null || python3 -c "print(round($TEMP_RAW / 1000.0, 1))" 2>/dev/null)
+else
+    TEMP_C="$TEMP_RAW"
+fi
 if [ -z "$TEMP_C" ]; then
     echo "UNKNOWN - Cannot parse temperature value: $TEMP_RAW"
     exit 3
@@ -28,9 +35,12 @@ fi
 ALARM_RAW=$(snmpget -v2c -c "$COMMUNITY" -Oqv -t "$TIMEOUT" "$HOST" "$OID_TEMP_ALARM" 2>/dev/null)
 if [ $? -eq 0 ]; then
     ALARM_VAL=$(echo "$ALARM_RAW" | sed 's/"//g' | tr -d ' ')
-    if [ "$ALARM_VAL" -ge 2 ] 2>/dev/null; then
-        echo "CRITICAL - Temperature alarm active, $TEMP_C°C (status: $ALARM_VAL)"
+    if [ "$ALARM_VAL" -ge 3 ] 2>/dev/null; then
+        echo "CRITICAL - Temperature alarm active (status: $ALARM_VAL), $TEMP_C°C"
         exit 2
+    elif [ "$ALARM_VAL" -ge 2 ] 2>/dev/null; then
+        echo "WARNING - Temperature warning (status: $ALARM_VAL), $TEMP_C°C"
+        exit 1
     fi
 fi
 

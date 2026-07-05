@@ -1,14 +1,14 @@
 #!/bin/bash
-# MikroTik RouterOS storage usage check via SNMP
+# MikroTik RouterOS storage usage check via SSH
 #
-# Uses MikroTik proprietary MIB (1.3.6.1.4.1.14988.1.1.7)
-# to query flash/disk storage entries. Skips memory (type 2).
-# Returns OK/WARNING/CRITICAL based on used percentage.
+# SSHes into the MikroTik, runs "/system resource print",
+# parses total-hdd-space and free-hdd-space (in MiB),
+# and returns OK/WARNING/CRITICAL based on used percentage.
 #
 # Output format: STATUS - X.X/YG used - Z%
 #
-# Usage: check_snmp_storage_mikrotik.sh <host> <warn> <crit> [community]
-# Example: check_snmp_storage_mikrotik.sh 192.168.1.2 80 90 LibreNms
+# Usage: check_snmp_storage_mikrotik.sh <host> <warn> <crit>
+# Example: check_snmp_storage_mikrotik.sh 192.168.1.2 80 90
 
 OK=0
 WARNING=1
@@ -18,29 +18,14 @@ UNKNOWN=3
 HOST=$1
 WARN=$2
 CRIT=$3
-COMMUNITY=${4:-${NAGIOS_SNMP_COMMUNITY:-public}}
-TIMEOUT=${NAGIOS_SNMP_TIMEOUT:-30}
+
+SSH_USER="master"
+SSH_PASS="Qwerty-1"
 
 if [ -z "$CRIT" ]; then
-    echo "UNKNOWN - Missing arguments. Usage: $0 <host> <warn> <crit> [community]"
+    echo "UNKNOWN - Missing arguments. Usage: $0 <host> <warn> <crit>"
     exit $UNKNOWN
 fi
-
-OID_MT_NAME="1.3.6.1.4.1.14988.1.1.7.1.1.1"
-OID_MT_TYPE="1.3.6.1.4.1.14988.1.1.7.1.1.2"
-OID_MT_SIZE="1.3.6.1.4.1.14988.1.1.7.1.1.3"
-OID_MT_USED="1.3.6.1.4.1.14988.1.1.7.1.1.4"
-
-snmp_get_val() {
-    local oid=$1
-    local raw
-    raw=$(snmpget -v2c -c "$COMMUNITY" -Oqv -t "$TIMEOUT" "$HOST" "$oid" 2>/dev/null)
-    if [ $? -eq 0 ] && [ -n "$raw" ] && ! echo "$raw" | grep -qi "no such"; then
-        echo "$raw" | tr -d '"'
-        return 0
-    fi
-    return 1
-}
 
 format_bytes() {
     local bytes=$1
@@ -53,56 +38,47 @@ format_bytes() {
     fi
 }
 
-STORAGE_SIZE=""
-STORAGE_USED=""
-STORAGE_NAME=""
+output=$(sshpass -p "$SSH_PASS" ssh \
+    -o StrictHostKeyChecking=no \
+    -o ConnectTimeout=10 \
+    -o UserKnownHostsFile=/dev/null \
+    "$SSH_USER@$HOST" \
+    "/system resource print" 2>/dev/null)
 
-for TRY_IDX in 1 2 3 4 5 6 7 8 9 10; do
-    TYPE_RAW=$(snmp_get_val "${OID_MT_TYPE}.${TRY_IDX}")
-    [ -z "$TYPE_RAW" ] && continue
-    if [ "$TYPE_RAW" = "2" ]; then
-        continue
-    fi
-    SIZE_RAW=$(snmp_get_val "${OID_MT_SIZE}.${TRY_IDX}")
-    if [ -z "$SIZE_RAW" ] || [ "$SIZE_RAW" -le 0 ] 2>/dev/null; then
-        continue
-    fi
-    USED_RAW=$(snmp_get_val "${OID_MT_USED}.${TRY_IDX}")
-    if [ -z "$USED_RAW" ]; then
-        continue
-    fi
-    NAME_RAW=$(snmp_get_val "${OID_MT_NAME}.${TRY_IDX}")
-    STORAGE_SIZE=$SIZE_RAW
-    STORAGE_USED=$USED_RAW
-    STORAGE_NAME="${NAME_RAW:-storage}"
-    break
-done
-
-if [ -z "$STORAGE_SIZE" ] || [ -z "$STORAGE_USED" ]; then
-    echo "UNKNOWN - No usable storage found on $HOST"
+if [ $? -ne 0 ] || [ -z "$output" ]; then
+    echo "UNKNOWN - SSH connection failed to $HOST"
     exit $UNKNOWN
 fi
 
-if [ "$STORAGE_SIZE" -le 0 ]; then
-    echo "UNKNOWN - Invalid storage size: $STORAGE_SIZE"
+total_raw=$(echo "$output" | grep "total-hdd-space:" | head -1 | sed 's/.*:[[:space:]]*//' | grep -oP '[\d.]+' | head -1)
+free_raw=$(echo "$output" | grep "free-hdd-space:" | head -1 | sed 's/.*:[[:space:]]*//' | grep -oP '[\d.]+' | head -1)
+
+if [ -z "$total_raw" ] || [ -z "$free_raw" ]; then
+    echo "UNKNOWN - Could not parse storage data from $HOST"
     exit $UNKNOWN
 fi
 
-USED_PCT=$(echo "scale=0; $STORAGE_USED * 100 / $STORAGE_SIZE" | bc 2>/dev/null)
-if [ -z "$USED_PCT" ]; then
-    USED_PCT=$((STORAGE_USED * 100 / STORAGE_SIZE))
+total_bytes=$(echo "$total_raw * 1048576" | bc 2>/dev/null)
+free_bytes=$(echo "$free_raw * 1048576" | bc 2>/dev/null)
+
+if [ -z "$total_bytes" ] || [ -z "$free_bytes" ] || [ "$(echo "$total_bytes <= 0" | bc)" -eq 1 ]; then
+    echo "UNKNOWN - Invalid storage values: total=${total_raw}MiB free=${free_raw}MiB"
+    exit $UNKNOWN
 fi
 
-USED_STR=$(format_bytes $STORAGE_USED)
-TOTAL_STR=$(format_bytes $STORAGE_SIZE)
+used_bytes=$(echo "$total_bytes - $free_bytes" | bc)
+used_pct=$(echo "scale=0; $used_bytes * 100 / $total_bytes" | bc)
 
-if [ "$USED_PCT" -ge "$CRIT" ]; then
-    echo "CRITICAL - ${USED_STR}/${TOTAL_STR} used - ${USED_PCT}%"
+used_str=$(format_bytes "$used_bytes")
+total_str=$(format_bytes "$total_bytes")
+
+if [ "$used_pct" -ge "$CRIT" ]; then
+    echo "CRITICAL - ${used_str}/${total_str} used - ${used_pct}%"
     exit $CRITICAL
-elif [ "$USED_PCT" -ge "$WARN" ]; then
-    echo "WARNING - ${USED_STR}/${TOTAL_STR} used - ${USED_PCT}%"
+elif [ "$used_pct" -ge "$WARN" ]; then
+    echo "WARNING - ${used_str}/${total_str} used - ${used_pct}%"
     exit $WARNING
 else
-    echo "OK - ${USED_STR}/${TOTAL_STR} used - ${USED_PCT}%"
+    echo "OK - ${used_str}/${total_str} used - ${used_pct}%"
     exit $OK
 fi

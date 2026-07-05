@@ -1,14 +1,7 @@
 #!/bin/bash
 # MikroTik RouterOS storage usage check via SSH
 #
-# SSHes into the MikroTik, runs "/system resource print",
-# parses total-hdd-space and free-hdd-space,
-# and returns OK/WARNING/CRITICAL based on used percentage.
-#
 # Output format: STATUS - X.X/YG used - Z%
-#
-# Usage: check_snmp_storage_mikrotik.sh <host> <warn> <crit>
-# Example: check_snmp_storage_mikrotik.sh 192.168.1.2 80 90
 
 OK=0
 WARNING=1
@@ -23,7 +16,7 @@ SSH_USER="test"
 SSH_PASS="Qwerty-1"
 
 if [ -z "$CRIT" ]; then
-    echo "UNKNOWN - Missing arguments. Usage: $0 <host> <warn> <crit>"
+    echo "UNKNOWN - Missing arguments"
     exit $UNKNOWN
 fi
 
@@ -34,7 +27,6 @@ to_bytes() {
         *GiB|*GB)   echo "$val * 1073741824" | bc ;;
         *MiB|*MB)   echo "$val * 1048576" | bc ;;
         *KiB|*kB)   echo "$val * 1024" | bc ;;
-        *B)         echo "$val" ;;
         *)          echo "$val * 1048576" | bc ;;
     esac
 }
@@ -62,16 +54,31 @@ if [ $? -ne 0 ] || [ -z "$output" ]; then
     exit $UNKNOWN
 fi
 
-total_line=$(echo "$output" | awk -F': ' '/total-hdd-space:/ {print $2}')
-free_line=$(echo "$output" | awk -F': ' '/free-hdd-space:/ {print $2}')
+total_val=""
+total_unit=""
+free_val=""
+free_unit=""
 
-total_val=$(echo "$total_line" | awk '{print $1}')
-total_unit=$(echo "$total_line" | awk '{print $2}')
-free_val=$(echo "$free_line" | awk '{print $1}')
-free_unit=$(echo "$free_line" | awk '{print $2}')
+while IFS= read -r line; do
+    line=$(echo "$line" | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//')
+    case "$line" in
+        total-hdd-space:*|free-hdd-space:*)
+            rest="${line#*: }"
+            [ "$rest" = "$line" ] && rest="${line#*:}"
+            val=$(echo "$rest" | grep -oE '^[0-9]+(\.[0-9]+)?')
+            unit=$(echo "$rest" | grep -oE '(KiB|MiB|GiB|kB|MB|GB|B)$')
+            [ -z "$val" ] && val=$(echo "$rest" | grep -oE '[0-9]+(\.[0-9]+)?' | head -1)
+            case "$line" in
+                total-hdd-space:*) total_val="$val"; total_unit="$unit" ;;
+                free-hdd-space:*)  free_val="$val";  free_unit="$unit" ;;
+            esac
+            ;;
+    esac
+done <<< "$output"
 
 if [ -z "$total_val" ] || [ -z "$free_val" ]; then
-    echo "UNKNOWN - Could not parse storage data from $HOST"
+    sanitized=$(echo "$output" | tr '\n' '|' | tr -c '[:print:]|' '?')
+    echo "UNKNOWN - Parse fail. Raw=[${sanitized}]"
     exit $UNKNOWN
 fi
 
@@ -79,7 +86,7 @@ total_bytes=$(to_bytes "$total_val" "$total_unit")
 free_bytes=$(to_bytes "$free_val" "$free_unit")
 
 if [ "$(echo "$total_bytes <= 0" | bc)" -eq 1 ]; then
-    echo "UNKNOWN - Invalid storage values: total=${total_val}${total_unit} free=${free_val}${free_unit}"
+    echo "UNKNOWN - Bad total: ${total_val}${total_unit}"
     exit $UNKNOWN
 fi
 

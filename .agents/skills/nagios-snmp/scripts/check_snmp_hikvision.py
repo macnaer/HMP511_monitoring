@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-# /// script
-# dependencies = [
-#   "pysnmp>=6.0.0",
-# ]
-# ///
 """
 Hikvision camera SNMP check for Nagios.
 
@@ -26,16 +21,21 @@ Exit codes:
 import argparse
 import os
 import sys
-from pysnmp.hlapi import (
-    SnmpEngine,
-    CommunityData,
-    UdpTransportTarget,
-    ContextData,
-    ObjectType,
-    ObjectIdentity,
-    getCmd,
-    nextCmd,
-)
+import traceback
+
+try:
+    from pysnmp.hlapi import (
+        SnmpEngine,
+        CommunityData,
+        UdpTransportTarget,
+        ContextData,
+        ObjectType,
+        ObjectIdentity,
+        getCmd,
+    )
+except ImportError as e:
+    print(f"UNKNOWN - pysnmp import failed: {e}")
+    sys.exit(3)
 
 
 # Nagios exit codes
@@ -46,15 +46,14 @@ UNKNOWN = 3
 
 # Hikvision specific OIDs
 HIKVISION_OIDS = {
-    "uptime": "1.3.6.1.2.1.1.3.0",           # sysUpTime
-    "time": "1.3.6.1.4.1.39165.1.19.0",       # System time
-    "storage_total": "1.3.6.1.2.1.25.2.3.1.5.1",  # hrStorageSize
-    "storage_used": "1.3.6.1.2.1.25.2.3.1.6.1",   # hrStorageUsed
+    "uptime": "1.3.6.1.2.1.1.3.0",
+    "time": "1.3.6.1.4.1.39165.1.19.0",
+    "storage_total": "1.3.6.1.2.1.25.2.3.1.5.1",
+    "storage_used": "1.3.6.1.2.1.25.2.3.1.6.1",
 }
 
 
-def snmp_get(host: str, oid: str, community: str, version: str, timeout: int) -> tuple[int, str]:
-    """Perform SNMP GET and return (exit_code, value_string)."""
+def snmp_get(host, oid, community, version, timeout):
     try:
         error_indication, error_status, error_index, var_binds = next(
             getCmd(
@@ -67,40 +66,35 @@ def snmp_get(host: str, oid: str, community: str, version: str, timeout: int) ->
         )
 
         if error_indication:
-            return CRITICAL, f"SNMP error: {error_indication}"
+            return CRITICAL, "SNMP error: %s" % error_indication
         if error_status:
-            return CRITICAL, f"SNMP error: {error_status.prettyPrint()}"
+            return CRITICAL, "SNMP error: %s" % error_status.prettyPrint()
         if var_binds:
             value = var_binds[0][1].prettyPrint()
             return OK, value
         return UNKNOWN, "No value returned"
 
     except Exception as e:
-        return UNKNOWN, f"Exception: {e}"
+        return UNKNOWN, "Exception: %s" % str(e)
 
 
-def check_uptime(host: str, community: str, version: str, timeout: int) -> tuple[int, str]:
-    """Check device uptime."""
+def check_uptime(host, community, version, timeout):
     exit_code, value = snmp_get(host, HIKVISION_OIDS["uptime"], community, version, timeout)
     if exit_code != OK:
-        return exit_code, f"Cannot get uptime: {value}"
+        return exit_code, "Cannot get uptime: %s" % value
 
     try:
-        # sysUpTime is in hundredths of seconds
         uptime_ticks = int(value)
         uptime_seconds = uptime_ticks // 100
         days = uptime_seconds // 86400
         hours = (uptime_seconds % 86400) // 3600
         minutes = (uptime_seconds % 3600) // 60
-        return OK, f"Uptime: {days}d {hours}h {minutes}m"
+        return OK, "Uptime: %dd %dh %dm" % (days, hours, minutes)
     except (ValueError, TypeError):
-        return OK, f"Uptime: {value}"
+        return OK, "Uptime: %s" % value
 
 
-def check_temperature(host: str, community: str, version: str, timeout: int,
-                      warn: float, crit: float) -> tuple[int, str]:
-    """Check device temperature."""
-    # Try common Hikvision temperature OIDs
+def check_temperature(host, community, version, timeout, warn, crit):
     temp_oids = [
         "1.3.6.1.4.1.39165.1.10.1.0",
         "1.3.6.1.4.1.39165.1.10.2.0",
@@ -113,19 +107,17 @@ def check_temperature(host: str, community: str, version: str, timeout: int,
                 temp = float(value)
                 if warn is not None and crit is not None:
                     if temp >= crit:
-                        return CRITICAL, f"Temperature: {temp}C (>={crit}C)"
+                        return CRITICAL, "Temperature: %sC (>=%sC)" % (temp, crit)
                     elif temp >= warn:
-                        return WARNING, f"Temperature: {temp}C (>={warn}C)"
-                return OK, f"Temperature: {temp}C"
+                        return WARNING, "Temperature: %sC (>=%sC)" % (temp, warn)
+                return OK, "Temperature: %sC" % temp
             except (ValueError, TypeError):
                 continue
 
     return UNKNOWN, "Temperature OID not available on this device"
 
 
-def check_storage(host: str, community: str, version: str, timeout: int,
-                  warn: float, crit: float) -> tuple[int, str]:
-    """Check storage usage percentage."""
+def check_storage(host, community, version, timeout, warn, crit):
     exit_code_total, value_total = snmp_get(host, HIKVISION_OIDS["storage_total"], community, version, timeout)
     exit_code_used, value_used = snmp_get(host, HIKVISION_OIDS["storage_used"], community, version, timeout)
 
@@ -139,21 +131,21 @@ def check_storage(host: str, community: str, version: str, timeout: int,
             return UNKNOWN, "Storage size is 0"
 
         percent = (used * 100) / total
-        if percent >= crit:
-            return CRITICAL, f"Storage: {percent:.1f}% used ({used}/{total})"
-        elif percent >= warn:
-            return WARNING, f"Storage: {percent:.1f}% used ({used}/{total})"
-        return OK, f"Storage: {percent:.1f}% used ({used}/{total})"
+        if warn is not None and crit is not None:
+            if percent >= crit:
+                return CRITICAL, "Storage: %.1f%% used (%d/%d)" % (percent, used, total)
+            elif percent >= warn:
+                return WARNING, "Storage: %.1f%% used (%d/%d)" % (percent, used, total)
+        return OK, "Storage: %.1f%% used (%d/%d)" % (percent, used, total)
     except (ValueError, TypeError):
         return UNKNOWN, "Invalid storage data"
 
 
-def check_time(host: str, community: str, version: str, timeout: int) -> tuple[int, str]:
-    """Check system time (just verify we can read it)."""
+def check_time(host, community, version, timeout):
     exit_code, value = snmp_get(host, HIKVISION_OIDS["time"], community, version, timeout)
     if exit_code != OK:
-        return exit_code, f"Cannot get time: {value}"
-    return OK, f"Time: {value}"
+        return exit_code, "Cannot get time: %s" % value
+    return OK, "Time: %s" % value
 
 
 def main():
@@ -171,16 +163,21 @@ def main():
                         help="Timeout in seconds")
     args = parser.parse_args()
 
-    checks = {
-        "uptime": lambda: check_uptime(args.host, args.community, args.version, args.timeout),
-        "temperature": lambda: check_temperature(args.host, args.community, args.version, args.timeout, args.warn, args.crit),
-        "storage": lambda: check_storage(args.host, args.community, args.version, args.timeout, args.warn, args.crit),
-        "time": lambda: check_time(args.host, args.community, args.version, args.timeout),
-    }
+    try:
+        checks = {
+            "uptime": lambda: check_uptime(args.host, args.community, args.version, args.timeout),
+            "temperature": lambda: check_temperature(args.host, args.community, args.version, args.timeout, args.warn, args.crit),
+            "storage": lambda: check_storage(args.host, args.community, args.version, args.timeout, args.warn, args.crit),
+            "time": lambda: check_time(args.host, args.community, args.version, args.timeout),
+        }
 
-    exit_code, message = checks[args.check]()
-    print(f"{['OK', 'WARNING', 'CRITICAL', 'UNKNOWN'][exit_code]} - {message}")
-    sys.exit(exit_code)
+        exit_code, message = checks[args.check]()
+        print("%s - %s" % (["OK", "WARNING", "CRITICAL", "UNKNOWN"][exit_code], message))
+        sys.exit(exit_code)
+
+    except Exception as e:
+        print("UNKNOWN - Script error: %s" % str(e))
+        sys.exit(UNKNOWN)
 
 
 if __name__ == "__main__":

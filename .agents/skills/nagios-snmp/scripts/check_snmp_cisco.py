@@ -355,9 +355,9 @@ def main():
     parser.add_argument("--check", required=True,
                         choices=["temperature", "fan", "psu", "storage", "cpu", "uptime", "interface"],
                         help="Check type to perform")
-    parser.add_argument("--warn", type=none_or_float, default=None, help="Warning threshold")
-    parser.add_argument("--crit", type=none_or_float, default=None, help="Critical threshold")
-    parser.add_argument("--interface", default=None, help="Interface name to check (e.g., GigabitEthernet0/1)")
+    parser.add_argument("--warn", type=none_or_float, nargs='?', const=None, default=None, help="Warning threshold")
+    parser.add_argument("--crit", type=none_or_float, nargs='?', const=None, default=None, help="Critical threshold")
+    parser.add_argument("--interface", nargs='?', const=None, default=None, help="Interface name to check (e.g., GigabitEthernet0/1)")
     parser.add_argument("--community", default=os.environ.get("NAGIOS_SNMP_COMMUNITY", "public"),
                         help="SNMP community string")
     parser.add_argument("--version", default=os.environ.get("NAGIOS_SNMP_VERSION", "2c"),

@@ -20,7 +20,7 @@ WARN=$2
 CRIT=$3
 
 SSH_USER="master"
-SSH_PASS="111"
+SSH_PASS="Qwerty-1"
 
 if [ -z "$CRIT" ]; then
     echo "UNKNOWN - Missing arguments. Usage: $0 <host> <warn> <crit>"

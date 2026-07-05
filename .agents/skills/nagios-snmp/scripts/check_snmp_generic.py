@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
-# /// script
-# dependencies = [
-#   "pysnmp>=6.0.0",
-# ]
-# ///
 """
 Generic SNMP check for Nagios.
 
 Usage:
-    check_snmp_generic.py --host HOST --oid OID [--warn WARN] [--crit CRIT] [--community COMMUNITY] [--timeout TIMEOUT]
+    check_snmp_generic.py --host HOST --oid OID [--warn WARN] [--crit CRIT]
 
 Exit codes:
     0 = OK
@@ -20,26 +15,29 @@ Exit codes:
 import argparse
 import os
 import sys
-from pysnmp.hlapi import (
-    SnmpEngine,
-    CommunityData,
-    UdpTransportTarget,
-    ContextData,
-    ObjectType,
-    ObjectIdentity,
-    getCmd,
-)
+
+try:
+    from pysnmp.hlapi import (
+        SnmpEngine,
+        CommunityData,
+        UdpTransportTarget,
+        ContextData,
+        ObjectType,
+        ObjectIdentity,
+        getCmd,
+    )
+except ImportError as e:
+    print("UNKNOWN - pysnmp import failed: %s" % e)
+    sys.exit(3)
 
 
-# Nagios exit codes
 OK = 0
 WARNING = 1
 CRITICAL = 2
 UNKNOWN = 3
 
 
-def snmp_get(host: str, oid: str, community: str, version: str, timeout: int) -> tuple[int, str]:
-    """Perform SNMP GET and return (exit_code, value_string)."""
+def snmp_get(host, oid, community, version, timeout):
     try:
         error_indication, error_status, error_index, var_binds = next(
             getCmd(
@@ -52,16 +50,16 @@ def snmp_get(host: str, oid: str, community: str, version: str, timeout: int) ->
         )
 
         if error_indication:
-            return CRITICAL, f"SNMP error: {error_indication}"
+            return CRITICAL, "SNMP error: %s" % error_indication
         if error_status:
-            return CRITICAL, f"SNMP error: {error_status.prettyPrint()}"
+            return CRITICAL, "SNMP error: %s" % error_status.prettyPrint()
         if var_binds:
             value = var_binds[0][1].prettyPrint()
             return OK, value
         return UNKNOWN, "No value returned"
 
     except Exception as e:
-        return UNKNOWN, f"Exception: {e}"
+        return UNKNOWN, "Exception: %s" % str(e)
 
 
 def main():
@@ -70,35 +68,37 @@ def main():
     parser.add_argument("--oid", required=True, help="OID to query")
     parser.add_argument("--warn", type=float, default=None, help="Warning threshold")
     parser.add_argument("--crit", type=float, default=None, help="Critical threshold")
-    parser.add_argument("--community", default=os.environ.get("NAGIOS_SNMP_COMMUNITY", "public"), help="SNMP community string")
-    parser.add_argument("--version", default=os.environ.get("NAGIOS_SNMP_VERSION", "2c"), help="SNMP version (1, 2c)")
-    parser.add_argument("--timeout", type=int, default=int(os.environ.get("NAGIOS_SNMP_TIMEOUT", "30")), help="Timeout in seconds")
+    parser.add_argument("--community", default=os.environ.get("NAGIOS_SNMP_COMMUNITY", "public"),
+                        help="SNMP community string")
+    parser.add_argument("--version", default=os.environ.get("NAGIOS_SNMP_VERSION", "2c"),
+                        help="SNMP version (1, 2c)")
+    parser.add_argument("--timeout", type=int, default=int(os.environ.get("NAGIOS_SNMP_TIMEOUT", "30")),
+                        help="Timeout in seconds")
     args = parser.parse_args()
 
     exit_code, value = snmp_get(args.host, args.oid, args.community, args.version, args.timeout)
 
     if exit_code != OK:
-        print(f"{['OK', 'WARNING', 'CRITICAL', 'UNKNOWN'][exit_code]} - {value}")
+        print("%s - %s" % (["OK", "WARNING", "CRITICAL", "UNKNOWN"][exit_code], value))
         sys.exit(exit_code)
 
-    # Try numeric comparison if thresholds provided
     if args.warn is not None and args.crit is not None:
         try:
             numeric_value = float(value)
             if numeric_value >= args.crit:
-                print(f"CRITICAL - {args.oid} = {value} (>= {args.crit})")
+                print("CRITICAL - %s = %s (>= %s)" % (args.oid, value, args.crit))
                 sys.exit(CRITICAL)
             elif numeric_value >= args.warn:
-                print(f"WARNING - {args.oid} = {value} (>= {args.warn})")
+                print("WARNING - %s = %s (>= %s)" % (args.oid, value, args.warn))
                 sys.exit(WARNING)
             else:
-                print(f"OK - {args.oid} = {value}")
+                print("OK - %s = %s" % (args.oid, value))
                 sys.exit(OK)
         except ValueError:
-            print(f"OK - {args.oid} = {value}")
+            print("OK - %s = %s" % (args.oid, value))
             sys.exit(OK)
 
-    print(f"OK - {args.oid} = {value}")
+    print("OK - %s = %s" % (args.oid, value))
     sys.exit(OK)
 
 

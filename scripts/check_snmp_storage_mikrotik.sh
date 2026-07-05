@@ -2,7 +2,7 @@
 # MikroTik RouterOS storage usage check via SSH
 #
 # SSHes into the MikroTik, runs "/system resource print",
-# parses total-hdd-space and free-hdd-space (in MiB),
+# parses total-hdd-space and free-hdd-space,
 # and returns OK/WARNING/CRITICAL based on used percentage.
 #
 # Output format: STATUS - X.X/YG used - Z%
@@ -27,14 +27,26 @@ if [ -z "$CRIT" ]; then
     exit $UNKNOWN
 fi
 
+to_bytes() {
+    local val=$1
+    local unit=$2
+    case "$unit" in
+        *GiB|*GB)   echo "$val * 1073741824" | bc ;;
+        *MiB|*MB)   echo "$val * 1048576" | bc ;;
+        *KiB|*kB)   echo "$val * 1024" | bc ;;
+        *B)         echo "$val" ;;
+        *)          echo "$val * 1048576" | bc ;;
+    esac
+}
+
 format_bytes() {
     local bytes=$1
-    if [ "$bytes" -ge 1073741824 ]; then
+    if [ "$(echo "$bytes >= 1073741824" | bc)" -eq 1 ]; then
         echo "$(echo "scale=1; $bytes / 1073741824" | bc)G"
-    elif [ "$bytes" -ge 1048576 ]; then
+    elif [ "$(echo "$bytes >= 1048576" | bc)" -eq 1 ]; then
         echo "$(echo "scale=1; $bytes / 1048576" | bc)M"
     else
-        echo "${bytes}B"
+        echo "$(echo "scale=1; $bytes / 1024" | bc)K"
     fi
 }
 
@@ -50,19 +62,24 @@ if [ $? -ne 0 ] || [ -z "$output" ]; then
     exit $UNKNOWN
 fi
 
-total_raw=$(echo "$output" | grep "total-hdd-space:" | head -1 | sed 's/.*:[[:space:]]*//' | grep -oP '[\d.]+' | head -1)
-free_raw=$(echo "$output" | grep "free-hdd-space:" | head -1 | sed 's/.*:[[:space:]]*//' | grep -oP '[\d.]+' | head -1)
+total_line=$(echo "$output" | awk -F': ' '/total-hdd-space:/ {print $2}')
+free_line=$(echo "$output" | awk -F': ' '/free-hdd-space:/ {print $2}')
 
-if [ -z "$total_raw" ] || [ -z "$free_raw" ]; then
+total_val=$(echo "$total_line" | awk '{print $1}')
+total_unit=$(echo "$total_line" | awk '{print $2}')
+free_val=$(echo "$free_line" | awk '{print $1}')
+free_unit=$(echo "$free_line" | awk '{print $2}')
+
+if [ -z "$total_val" ] || [ -z "$free_val" ]; then
     echo "UNKNOWN - Could not parse storage data from $HOST"
     exit $UNKNOWN
 fi
 
-total_bytes=$(echo "$total_raw * 1048576" | bc 2>/dev/null)
-free_bytes=$(echo "$free_raw * 1048576" | bc 2>/dev/null)
+total_bytes=$(to_bytes "$total_val" "$total_unit")
+free_bytes=$(to_bytes "$free_val" "$free_unit")
 
-if [ -z "$total_bytes" ] || [ -z "$free_bytes" ] || [ "$(echo "$total_bytes <= 0" | bc)" -eq 1 ]; then
-    echo "UNKNOWN - Invalid storage values: total=${total_raw}MiB free=${free_raw}MiB"
+if [ "$(echo "$total_bytes <= 0" | bc)" -eq 1 ]; then
+    echo "UNKNOWN - Invalid storage values: total=${total_val}${total_unit} free=${free_val}${free_unit}"
     exit $UNKNOWN
 fi
 

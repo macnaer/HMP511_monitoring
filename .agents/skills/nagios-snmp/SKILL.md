@@ -1,7 +1,7 @@
 ---
 name: nagios-snmp
 description: SNMP-based Nagios monitoring checks for network devices. Use when creating or troubleshooting SNMP checks for switches, routers, cameras, or any SNMP-enabled device. Supports generic SNMP queries, Hikvision cameras, and Cisco devices.
-compatibility: Requires Python 3.11+, pysnmp library, and network access to SNMP-enabled devices.
+compatibility: Requires Python 3.11+, pysnmp-lextudio library, and network access to SNMP-enabled devices.
 metadata:
   author: nagios-monitoring
   version: "1.0"

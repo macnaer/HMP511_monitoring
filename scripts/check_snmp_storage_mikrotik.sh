@@ -1,7 +1,8 @@
 #!/bin/bash
 # MikroTik RouterOS storage usage check via SNMP
 #
-# Auto-discovers hrStorage entries, skips RAM (type 2/3).
+# Uses MikroTik proprietary MIB (1.3.6.1.4.1.14988.1.1.7)
+# to query flash/disk storage entries. Skips memory (type 2).
 # Returns OK/WARNING/CRITICAL based on used percentage.
 #
 # Output format: STATUS - X.X/YG used - Z%
@@ -25,29 +26,17 @@ if [ -z "$CRIT" ]; then
     exit $UNKNOWN
 fi
 
-OID_TYPE="1.3.6.1.2.1.25.2.3.1.2"
-OID_DESCR="1.3.6.1.2.1.25.2.3.1.3"
-OID_ALLOC="1.3.6.1.2.1.25.2.3.1.4"
-OID_SIZE="1.3.6.1.2.1.25.2.3.1.5"
-OID_USED="1.3.6.1.2.1.25.2.3.1.6"
+OID_MT_NAME="1.3.6.1.4.1.14988.1.1.7.1.1.1"
+OID_MT_TYPE="1.3.6.1.4.1.14988.1.1.7.1.1.2"
+OID_MT_SIZE="1.3.6.1.4.1.14988.1.1.7.1.1.3"
+OID_MT_USED="1.3.6.1.4.1.14988.1.1.7.1.1.4"
 
 snmp_get_val() {
     local oid=$1
     local raw
     raw=$(snmpget -v2c -c "$COMMUNITY" -Oqv -t "$TIMEOUT" "$HOST" "$oid" 2>/dev/null)
     if [ $? -eq 0 ] && [ -n "$raw" ] && ! echo "$raw" | grep -qi "no such"; then
-        echo "$raw" | tr -d '" '
-        return 0
-    fi
-    return 1
-}
-
-snmp_walk_oids() {
-    local oid=$1
-    local raw
-    raw=$(snmpwalk -v2c -c "$COMMUNITY" -Oqn -t "$TIMEOUT" "$HOST" "$oid" 2>/dev/null)
-    if [ -n "$raw" ]; then
-        echo "$raw"
+        echo "$raw" | tr -d '"'
         return 0
     fi
     return 1
@@ -64,39 +53,30 @@ format_bytes() {
     fi
 }
 
-walk_output=$(snmp_walk_oids "$OID_TYPE")
-if [ -z "$walk_output" ]; then
-    echo "UNKNOWN - SNMP query failed for $HOST"
-    exit $UNKNOWN
-fi
-
 STORAGE_SIZE=""
 STORAGE_USED=""
-STORAGE_DESCR=""
+STORAGE_NAME=""
 
-while IFS= read -r line; do
-    [ -z "$line" ] && continue
-    oid=$(echo "$line" | awk '{print $1}')
-    type_val=$(echo "$line" | awk '{print $2}' | tr -d '"')
-    idx="${oid##*.}"
-    if [ "$type_val" = "2" ] || [ "$type_val" = "3" ]; then
+for TRY_IDX in 1 2 3 4 5 6 7 8 9 10; do
+    TYPE_RAW=$(snmp_get_val "${OID_MT_TYPE}.${TRY_IDX}")
+    [ -z "$TYPE_RAW" ] && continue
+    if [ "$TYPE_RAW" = "2" ]; then
         continue
     fi
-    size_raw=$(snmp_get_val "${OID_SIZE}.${idx}")
-    if [ -z "$size_raw" ] || [ "$size_raw" -le 0 ] 2>/dev/null; then
+    SIZE_RAW=$(snmp_get_val "${OID_MT_SIZE}.${TRY_IDX}")
+    if [ -z "$SIZE_RAW" ] || [ "$SIZE_RAW" -le 0 ] 2>/dev/null; then
         continue
     fi
-    used_raw=$(snmp_get_val "${OID_USED}.${idx}")
-    alloc_raw=$(snmp_get_val "${OID_ALLOC}.${idx}")
-    descr_raw=$(snmp_get_val "${OID_DESCR}.${idx}")
-    if [ -z "$used_raw" ] || [ -z "$alloc_raw" ] || [ "$alloc_raw" -le 0 ] 2>/dev/null; then
+    USED_RAW=$(snmp_get_val "${OID_MT_USED}.${TRY_IDX}")
+    if [ -z "$USED_RAW" ]; then
         continue
     fi
-    STORAGE_SIZE=$((size_raw * alloc_raw))
-    STORAGE_USED=$((used_raw * alloc_raw))
-    STORAGE_DESCR="$descr_raw"
+    NAME_RAW=$(snmp_get_val "${OID_MT_NAME}.${TRY_IDX}")
+    STORAGE_SIZE=$SIZE_RAW
+    STORAGE_USED=$USED_RAW
+    STORAGE_NAME="${NAME_RAW:-storage}"
     break
-done <<< "$walk_output"
+done
 
 if [ -z "$STORAGE_SIZE" ] || [ -z "$STORAGE_USED" ]; then
     echo "UNKNOWN - No usable storage found on $HOST"

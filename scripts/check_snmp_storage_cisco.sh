@@ -88,6 +88,23 @@ is_numeric() {
 STORAGE_SIZE=""
 STORAGE_USED=""
 DESCR="flash"
+DIAG=()
+
+diag_add() {
+    local label=$1
+    local msg=$2
+    DIAG+=("${label}:${msg}")
+}
+
+snmp_get_val_raw() {
+    local oid=$1
+    local timeout=${2:-15}
+    local raw
+    raw=$(snmpget -v2c -c "$COMMUNITY" -Oqv -t "$timeout" "$HOST" "$oid" 2>/dev/null)
+    local rc=$?
+    echo "$raw"
+    return $rc
+}
 
 # ============================================================
 # STRATEGY 1: OLD-CISCO-FLASH-MIB (scalar OIDs)
@@ -96,15 +113,16 @@ DESCR="flash"
 # ============================================================
 if [ -z "$STORAGE_SIZE" ] && { [ "$INDEX" = "auto" ] || [ -z "$INDEX" ]; }; then
     debug_log "Strategy 1: OLD-CISCO-FLASH-MIB scalars..."
-    TOTAL_RAW=$(snmp_get_val "1.3.6.1.4.1.9.2.10.0" 10)
-    if [ -n "$TOTAL_RAW" ] && is_numeric "$TOTAL_RAW" && [ "$TOTAL_RAW" -gt 0 ]; then
-        AVAIL_RAW=$(snmp_get_val "1.3.6.1.4.1.9.2.11.0" 10)
-        if [ -n "$AVAIL_RAW" ] && is_numeric "$AVAIL_RAW" ]; then
-            STORAGE_SIZE=$((TOTAL_RAW / 1024))
-            STORAGE_USED=$(( (TOTAL_RAW - AVAIL_RAW) / 1024 ))
-            debug_log "Strategy 1 OK: total=${TOTAL_RAW}B avail=${AVAIL_RAW}B"
-        fi
+    S1_TOTAL=$(snmp_get_val_raw "1.3.6.1.4.1.9.2.10.0" 10)
+    S1_AVAIL=$(snmp_get_val_raw "1.3.6.1.4.1.9.2.11.0" 10)
+    TOTAL_RAW=$(echo "$S1_TOTAL" | tr -d '" ')
+    AVAIL_RAW=$(echo "$S1_AVAIL" | tr -d '" ')
+    if is_numeric "$TOTAL_RAW" && [ "$TOTAL_RAW" -gt 0 ] && is_numeric "$AVAIL_RAW"; then
+        STORAGE_SIZE=$((TOTAL_RAW / 1024))
+        STORAGE_USED=$(( (TOTAL_RAW - AVAIL_RAW) / 1024 ))
+        debug_log "Strategy 1 OK: total=${TOTAL_RAW}B avail=${AVAIL_RAW}B"
     fi
+    diag_add "S1" "1.3.6.1.4.1.9.2.10=[${S1_TOTAL}] 1.3.6.1.4.1.9.2.11=[${S1_AVAIL}]"
 fi
 
 # ============================================================
@@ -120,7 +138,9 @@ if [ -z "$STORAGE_SIZE" ]; then
     CISCO_FS_UNIT_OID="1.3.6.1.4.1.9.9.288.1.1.3.1.8"
 
     FS_WALK=$(snmp_walk_oids "$CISCO_FS_TOTAL_OID" 15)
+    S2_COUNT=0
     if [ -n "$FS_WALK" ]; then
+        S2_COUNT=$(echo "$FS_WALK" | wc -l)
         while IFS= read -r fs_line; do
             [ -z "$fs_line" ] && continue
             FS_IDX=$(get_oid_index "$fs_line")
@@ -148,8 +168,10 @@ if [ -z "$STORAGE_SIZE" ]; then
     # Brute-force fallback for CISCO-FILE-SYSTEM-MIB indexes 1-5
     if [ -z "$STORAGE_SIZE" ]; then
         debug_log "Strategy 2 fallback: brute-force FS indexes 1-5..."
+        S2_BF=""
         for TRY_FS in 1 2 3 4 5; do
             FS_TOTAL=$(snmp_get_val "${CISCO_FS_TOTAL_OID}.${TRY_FS}" 10)
+            S2_BF="${S2_BF}[${TRY_FS}=${FS_TOTAL}]"
             if is_numeric "$FS_TOTAL" && [ "$FS_TOTAL" -gt 0 ]; then
                 FS_FREE=$(snmp_get_val "${CISCO_FS_FREE_OID}.${TRY_FS}" 10)
                 FS_UNIT=$(snmp_get_val "${CISCO_FS_UNIT_OID}.${TRY_FS}" 10)
@@ -166,6 +188,9 @@ if [ -z "$STORAGE_SIZE" ]; then
                 fi
             fi
         done
+        diag_add "S2" "walk=(${S2_COUNT} entries) brute=${S2_BF}"
+    else
+        diag_add "S2" "walk=(${S2_COUNT} entries) OK index=${FS_IDX}"
     fi
 fi
 
@@ -180,7 +205,9 @@ if [ -z "$STORAGE_SIZE" ]; then
     FLASH_PART_FREE_OID="1.3.6.1.4.1.9.9.10.1.1.4.1.1.5"
 
     PART_WALK=$(snmp_walk_oids "$FLASH_PART_SIZE_OID" 15)
+    S3_COUNT=0
     if [ -n "$PART_WALK" ]; then
+        S3_COUNT=$(echo "$PART_WALK" | wc -l)
         while IFS= read -r part_line; do
             [ -z "$part_line" ] && continue
             PART_IDX=$(get_oid_index "$part_line")
@@ -203,8 +230,10 @@ if [ -z "$STORAGE_SIZE" ]; then
     # Brute-force fallback indexes 1-15
     if [ -z "$STORAGE_SIZE" ]; then
         debug_log "Strategy 3 fallback: brute-force partition indexes 1-15..."
+        S3_BF=""
         for TRY_PART in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
             PART_SIZE_VAL=$(snmp_get_val "${FLASH_PART_SIZE_OID}.${TRY_PART}" 10)
+            S3_BF="${S3_BF}[${TRY_PART}=${PART_SIZE_VAL}]"
             if is_numeric "$PART_SIZE_VAL" && [ "$PART_SIZE_VAL" -gt 0 ]; then
                 PART_FREE_VAL=$(snmp_get_val "${FLASH_PART_FREE_OID}.${TRY_PART}" 10)
                 if is_numeric "$PART_FREE_VAL"; then
@@ -216,6 +245,9 @@ if [ -z "$STORAGE_SIZE" ]; then
                 fi
             fi
         done
+        diag_add "S3" "walk=(${S3_COUNT} entries) brute=${S3_BF}"
+    else
+        diag_add "S3" "walk=(${S3_COUNT} entries) OK index=${PART_IDX}"
     fi
 fi
 
@@ -229,9 +261,19 @@ if [ -z "$STORAGE_SIZE" ]; then
     OID_USED="1.3.6.1.2.1.25.2.3.1.6"
     OID_TYPE="1.3.6.1.2.1.25.2.3.1.2"
 
+    S4_TYPES=""
     if [ "$INDEX" = "auto" ] || [ -z "$INDEX" ]; then
         TYPE_RAW=$(snmpwalk -v2c -c "$COMMUNITY" -Oqn -t 30 "$HOST" "$OID_TYPE" 2>/dev/null)
         SIZE_RAW=$(snmpwalk -v2c -c "$COMMUNITY" -Oqn -t 30 "$HOST" "$OID_SIZE" 2>/dev/null)
+
+        if [ -n "$TYPE_RAW" ]; then
+            while IFS= read -r type_line; do
+                [ -z "$type_line" ] && continue
+                TIDX=$(get_oid_index "$type_line")
+                TVAL=$(get_oid_value "$type_line")
+                S4_TYPES="${S4_TYPES}[${TIDX}=${TVAL}]"
+            done <<< "$TYPE_RAW"
+        fi
 
         if [ -n "$TYPE_RAW" ] && [ -n "$SIZE_RAW" ]; then
             while IFS= read -r type_line; do
@@ -268,6 +310,9 @@ if [ -z "$STORAGE_SIZE" ]; then
                 STORAGE_USED=$(echo "$SNMP_USED_RAW" | tr -d '" ' | head -n1)
             fi
         fi
+        diag_add "S4" "auto types=${S4_TYPES} used_index=${INDEX}"
+    else
+        diag_add "S4" "auto types=${S4_TYPES} no_non_memory_found"
     fi
 
     # ============================================================
@@ -275,8 +320,10 @@ if [ -z "$STORAGE_SIZE" ]; then
     # ============================================================
     if [ -z "$STORAGE_SIZE" ]; then
         debug_log "Strategy 5: hrStorage brute-force indexes 1-15..."
+        S5_OUT=""
         for TRY_IDX in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
             SNMP_SIZE_RAW=$(snmpget -v2c -c "$COMMUNITY" -Oqv -t 10 "$HOST" "${OID_SIZE}.${TRY_IDX}" 2>/dev/null)
+            S5_OUT="${S5_OUT}[${TRY_IDX}=${SNMP_SIZE_RAW}]"
             if [ $? -eq 0 ] && [ -n "$SNMP_SIZE_RAW" ] && ! echo "$SNMP_SIZE_RAW" | grep -qi "no such"; then
                 SIZE_VAL=$(echo "$SNMP_SIZE_RAW" | tr -d '" ' | head -n1)
                 if is_numeric "$SIZE_VAL" && [ "$SIZE_VAL" -gt 0 ]; then
@@ -294,6 +341,7 @@ if [ -z "$STORAGE_SIZE" ]; then
                 fi
             fi
         done
+        diag_add "S5" "${S5_OUT}"
     fi
 fi
 
@@ -305,7 +353,9 @@ if [ -z "$STORAGE_SIZE" ]; then
     if command -v snmptable &>/dev/null; then
         TABLE_OUT=$(snmptable -v2c -c "$COMMUNITY" -CH -Cb -t 15 "$HOST" hrStorageTable 2>/dev/null)
         debug_raw "snmptable hrStorage => [${TABLE_OUT}]"
+        S6_FOUND=""
         if [ -n "$TABLE_OUT" ]; then
+            S6_COUNT=$(echo "$TABLE_OUT" | wc -l)
             while IFS= read -r tbl_line; do
                 [ -z "$tbl_line" ] && continue
                 TBL_IDX=$(echo "$tbl_line" | awk '{print $1}')
@@ -313,6 +363,7 @@ if [ -z "$STORAGE_SIZE" ]; then
                 TBL_DESCR=$(echo "$tbl_line" | awk '{print $3}' | tr -d '"')
                 TBL_SIZE=$(echo "$tbl_line" | awk '{print $5}')
                 TBL_USED=$(echo "$tbl_line" | awk '{print $6}')
+                S6_FOUND="${S6_FOUND}[${TBL_IDX}=${TBL_TYPE}:${TBL_DESCR}:size=${TBL_SIZE}]"
                 if is_numeric "$TBL_SIZE" && [ "$TBL_SIZE" -gt 0 ] && \
                    is_numeric "$TBL_USED" && ! echo "$TBL_TYPE" | grep -qE "\.(2|3)$"; then
                     STORAGE_SIZE=$TBL_SIZE
@@ -323,7 +374,9 @@ if [ -z "$STORAGE_SIZE" ]; then
                 fi
             done <<< "$TABLE_OUT"
         fi
+        diag_add "S6" "rows=${S6_COUNT:-0} ${S6_FOUND}"
     else
+        diag_add "S6" "snmptable_binary_not_found"
         debug_log "snmptable not available, skipping Strategy 6"
     fi
 fi
@@ -332,7 +385,11 @@ fi
 # Validate results
 # ============================================================
 if [ -z "$STORAGE_SIZE" ] || [ -z "$STORAGE_USED" ]; then
-    echo "UNKNOWN - No storage found on ${HOST} (tried all 6 strategies)"
+    DIAG_STR=""
+    for entry in "${DIAG[@]}"; do
+        DIAG_STR="${DIAG_STR} ${entry}"
+    done
+    echo "UNKNOWN - No storage found on ${HOST}|${DIAG_STR}"
     exit $UNKNOWN
 fi
 

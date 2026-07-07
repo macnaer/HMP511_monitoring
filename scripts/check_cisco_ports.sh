@@ -26,7 +26,7 @@ declare -A DESCR_MAP
 while IFS= read -r line; do
     [ -z "$line" ] && continue
     idx=$(echo "$line" | sed 's/.*\.//' | awk '{print $1}')
-    name=$(echo "$line" | sed 's/.*= //' | tr -d '" ')
+    name=$(echo "$line" | sed 's/.*= //' | sed 's/.*: //' | tr -d '" ')
     DESCR_MAP[$idx]=$name
 done <<< "$DESCR_RAW"
 
@@ -36,12 +36,12 @@ TOTAL_ADMIN_UP=0
 while IFS= read -r line; do
     [ -z "$line" ] && continue
     idx=$(echo "$line" | sed 's/.*\.//' | awk '{print $1}')
-    status=$(echo "$line" | sed 's/.*= //')
+    status=$(echo "$line" | sed 's/.*= //' | grep -oE '[0-9]+' | head -1)
     [ "$status" != "1" ] && continue
     TOTAL_ADMIN_UP=$((TOTAL_ADMIN_UP + 1))
 
     oper_line=$(echo "$OPER_RAW" | grep "\.${idx} ")
-    oper=$(echo "$oper_line" | sed 's/.*= //')
+    oper=$(echo "$oper_line" | sed 's/.*= //' | grep -oE '[0-9]+' | head -1)
     if [ "$oper" = "2" ]; then
         name="${DESCR_MAP[$idx]:-ifIndex.$idx}"
         DOWN_PORTS+=("$name")

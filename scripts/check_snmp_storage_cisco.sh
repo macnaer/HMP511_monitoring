@@ -74,6 +74,14 @@ get_oid_index() {
     echo "$1" | awk '{print $1}' | awk -F. '{print $NF}'
 }
 
+get_oid_suffix() {
+    local line=$1
+    local base=$2
+    local oid
+    oid=$(echo "$line" | awk '{print $1}' | sed 's/^\.//')
+    echo "$oid" | sed "s/^${base}\.//"
+}
+
 get_oid_value() {
     echo "$1" | awk '{print $2}'
 }
@@ -276,10 +284,11 @@ if [ -z "$STORAGE_SIZE" ]; then
         while IFS= read -r part_line; do
             [ -z "$part_line" ] && continue
             PART_IDX=$(get_oid_index "$part_line")
+            PART_FULL_IDX=$(get_oid_suffix "$part_line" "$FLASH_PART_SIZE_OID")
             PART_SIZE_VAL=$(get_oid_value "$part_line")
-            debug_log "  Partition index ${PART_IDX}: size_raw=${PART_SIZE_VAL}"
+            debug_log "  Partition index ${PART_IDX} full_idx=${PART_FULL_IDX}: size_raw=${PART_SIZE_VAL}"
             if is_numeric "$PART_SIZE_VAL" && [ "$PART_SIZE_VAL" -gt 0 ]; then
-                PART_FREE_VAL=$(snmp_get_val "${FLASH_PART_FREE_OID}.${PART_IDX}" 10)
+                PART_FREE_VAL=$(snmp_get_val "${FLASH_PART_FREE_OID}.${PART_FULL_IDX}" 10)
                 debug_log "  Partition index ${PART_IDX}: free_raw=${PART_FREE_VAL}"
                 if is_numeric "$PART_FREE_VAL"; then
                     STORAGE_SIZE=$((PART_SIZE_VAL / 1024))

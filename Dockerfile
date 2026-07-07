@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Install Python packages for Nagios checks
 RUN pip3 install --break-system-packages \
-    pysnmp-lextudio \
+    pysnmp>=6.0.0 \
     psutil>=5.9.0
 
 # Set default SNMP community

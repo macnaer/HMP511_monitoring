@@ -46,12 +46,12 @@ strategy_entity_sensor() {
     for idx in $(echo "${!SENSORS[@]}" | tr ' ' '\n' | sed 's/_.*//' | sort -nu); do
         sclass="${SENSORS[${idx}_1]}"
         stype="${SENSORS[${idx}_2]}"
-        [ "$sclass" != "8" ] && continue
+        [ "$sclass" != "9" ] && [ "$stype" != "8" ] && continue
 
         svalue="${SENSORS[${idx}_4]}"
         sprecision="${SENSORS[${idx}_3]:-0}"
-        sscale="${SENSORS[${idx}_2]:-9}"
-        soper="${SENSORS[${idx}_5]:-1}"
+        sscale="${SENSORS[${idx}_5]:-9}"
+        soper="${SENSORS[${idx}_8]:-1}"
 
         [ "$svalue" = "-1000000000" ] || [ "$soper" != "1" ] && continue
 
@@ -117,7 +117,7 @@ strategy_envmon() {
 
     FOUND=0
     for idx in $(echo "${!VMAP[@]}" | tr ' ' '\n' | sort -n); do
-        [ -z "${DMAP[$idx]}" ] && DMAP[$idx]="Sensor ${idx}"
+        [ -z "${DMAP[$idx]}" ] && continue
         raw="${VMAP[$idx]}"
         tc="$raw"
         if [ "$raw" -gt 1000 ] 2>/dev/null; then
@@ -144,9 +144,6 @@ strategy_old_envmon() {
         tc=$(echo "scale=1; $RAW / 1000" | bc -l 2>/dev/null || python3 -c "print(round($RAW / 1000.0, 1))" 2>/dev/null)
     fi
     is_numeric "$tc" || return 1
-    if [ "$(echo "$tc < 5" | bc -l 2>/dev/null)" = "1" ] || [ "$(echo "$tc > 100" | bc -l 2>/dev/null)" = "1" ]; then
-        return 1
-    fi
     TEMP_RESULTS+=("${tc}|System Temp")
 }
 

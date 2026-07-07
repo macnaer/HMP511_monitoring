@@ -454,7 +454,7 @@ if [ -z "$STORAGE_SIZE" ] || [ -z "$STORAGE_USED" ]; then
     for entry in "${DIAG[@]}"; do
         DIAG_STR="${DIAG_STR} ${entry}"
     done
-    echo "UNKNOWN - No storage found on ${HOST}|${DIAG_STR}"
+    echo "UNKNOWN - No storage found on ${HOST} [${DIAG_STR}]"
     exit $UNKNOWN
 fi
 

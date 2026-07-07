@@ -117,7 +117,7 @@ strategy_envmon() {
 
     FOUND=0
     for idx in $(echo "${!VMAP[@]}" | tr ' ' '\n' | sort -n); do
-        [ -z "${DMAP[$idx]}" ] && DMAP[$idx]="Sensor ${idx}"
+        [ -z "${DMAP[$idx]}" ] && continue
         raw="${VMAP[$idx]}"
         tc="$raw"
         if [ "$raw" -gt 1000 ] 2>/dev/null; then

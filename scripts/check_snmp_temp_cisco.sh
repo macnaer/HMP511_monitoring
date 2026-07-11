@@ -131,7 +131,78 @@ strategy_envmon() {
 }
 
 # ----------------------------------------------------------------
-# Strategy 4: OLD-CISCO-ENVMON-MIB scalar fallback
+# Strategy 4: CISCO-ENTITY-SENSOR-MIB (entSensorValue)
+# Cisco private sensor MIB: 1.3.6.1.4.1.9.9.91
+# ----------------------------------------------------------------
+strategy_cisco_entity_sensor() {
+    STRATEGIES_USED="${STRATEGIES_USED}cisco-entity-sensor-mib "
+    RAW=$(snmp_walk "1.3.6.1.4.1.9.9.91.1.1.1.1")
+    [ -z "$RAW" ] && return 1
+
+    declare -A DATA
+    while IFS= read -r line; do
+        oid=$(echo "$line" | sed 's/ =.*//')
+        val=$(echo "$line" | sed 's/.*= //' | sed 's/"//g' | tr -d ' ')
+        echo "$val" | grep -qiE "NoSuchInstance|NoSuchObject|NoSuchName" && continue
+        col=$(echo "$oid" | sed -n 's/.*\.1\.1\.1\.\([0-9]\+\).*/\1/p')
+        idx=$(echo "$oid" | sed -n 's/.*\.\([0-9]\+\)$/\1/p')
+        [ -n "$col" ] && [ -n "$idx" ] && DATA["${idx}_${col}"]=$val
+    done <<< "$RAW"
+
+    FOUND=0
+    for idx in $(echo "${!DATA[@]}" | tr ' ' '\n' | sed 's/_.*//' | sort -nu); do
+        stype="${DATA[${idx}_2]}"
+        [ "$stype" != "8" ] && continue
+        svalue="${DATA[${idx}_4]}"
+        sprecision="${DATA[${idx}_3]:-0}"
+        sscale="${DATA[${idx}_5]:-9}"
+        soper="${DATA[${idx}_8]:-1}"
+        [ "$svalue" = "-1000000000" ] || [ "$soper" != "1" ] && continue
+
+        divisor=1
+        for ((i=0; i<sprecision; i++)); do divisor=$((divisor * 10)); done
+        case "$sscale" in
+            10) sf=1000 ;;
+            11) sf=1000000 ;;
+            *)  sf=1 ;;
+        esac
+
+        tc=$(echo "scale=1; $svalue / $divisor / $sf" | bc -l 2>/dev/null || python3 -c "print(round($svalue / $divisor / $sf, 1))" 2>/dev/null)
+        is_numeric "$tc" || continue
+        TEMP_RESULTS+=("${tc}|Sensor ${idx}")
+        FOUND=1
+    done
+    [ "$FOUND" -eq 1 ]
+}
+
+# ----------------------------------------------------------------
+# Strategy 5: CISCO-ENVMON-MIB brute-force common indices
+# (some switches report temp at specific scalar indices)
+# ----------------------------------------------------------------
+strategy_envmon_bruteforce() {
+    STRATEGIES_USED="${STRATEGIES_USED}envmon-bruteforce "
+    FOUND=0
+    for idx in 1 2 3 4 5 6 7 8 9 10 1000 1004 1005 1006 1007 1008 1009 1010 1011 1012 1013 1014 1015 1020 2000 2004 2005 3000 3004 3005 4000 4004 5000; do
+        desc=$(snmp_get "1.3.6.1.4.1.9.9.13.1.3.1.2.$idx" 2>/dev/null | sed 's/"//g')
+        val=$(snmp_get "1.3.6.1.4.1.9.9.13.1.3.1.3.$idx" 2>/dev/null | tr -d ' ')
+        [ -z "$val" ] && continue
+        echo "$val" | grep -qiE "NoSuchInstance|NoSuchObject|NoSuchName" && continue
+        is_numeric "$val" || continue
+        [ -z "$desc" ] && desc="Sensor ${idx}"
+        tc="$val"
+        if [ "$val" -gt 1000 ] 2>/dev/null; then
+            tc=$(echo "scale=1; $val / 1000" | bc -l 2>/dev/null || python3 -c "print(round($val / 1000.0, 1))" 2>/dev/null)
+        fi
+        is_numeric "$tc" || continue
+        TEMP_RESULTS+=("${tc}|${desc}")
+        FOUND=1
+    done
+    [ "$FOUND" -eq 1 ]
+}
+
+# ----------------------------------------------------------------
+# Strategy 6: OLD-CISCO-ENVMON-MIB scalar status code
+# Returns 1=Normal, 2=Warning, 3=Critical (NOT actual temperature)
 # ----------------------------------------------------------------
 strategy_old_envmon() {
     STRATEGIES_USED="${STRATEGIES_USED}old-cisco-envmon-mib "
@@ -139,18 +210,19 @@ strategy_old_envmon() {
     [ -z "$RAW" ] && return 1
     RAW=$(echo "$RAW" | sed 's/"//g' | tr -d ' ')
     is_numeric "$RAW" || return 1
-    tc="$RAW"
-    if [ "$RAW" -gt 1000 ] 2>/dev/null; then
-        tc=$(echo "scale=1; $RAW / 1000" | bc -l 2>/dev/null || python3 -c "print(round($RAW / 1000.0, 1))" 2>/dev/null)
-    fi
-    is_numeric "$tc" || return 1
-    TEMP_RESULTS+=("${tc}|System Temp")
+
+    case $RAW in
+        1) TEMP_RESULTS+=("ok:0|System Temp") ;;
+        2) TEMP_RESULTS+=("warn:0|System Temp") ;;
+        3) TEMP_RESULTS+=("crit:0|System Temp") ;;
+        *) TEMP_RESULTS+=("ok:0|System Temp") ;;
+    esac
 }
 
 # ================================================================
 # MAIN: try strategies in order
 # ================================================================
-strategy_entity_sensor || strategy_cpu_temp || strategy_envmon || strategy_old_envmon
+strategy_entity_sensor || strategy_cpu_temp || strategy_envmon || strategy_cisco_entity_sensor || strategy_envmon_bruteforce || strategy_old_envmon
 
 if [ ${#TEMP_RESULTS[@]} -eq 0 ]; then
     echo "CRITICAL - No temperature sensors found (tried: ${STRATEGIES_USED:-none})"
@@ -164,19 +236,35 @@ for entry in "${TEMP_RESULTS[@]}"; do
     tc="${entry%%|*}"
     label="${entry##*|}"
 
-    STATUS=0
-    if [ -n "$CRIT" ] && [ "$CRIT" != "none" ] && [ "$(echo "$tc >= $CRIT" | bc -l 2>/dev/null)" = "1" ]; then
-        STATUS=2
-    elif [ -n "$WARN" ] && [ "$WARN" != "none" ] && [ "$(echo "$tc >= $WARN" | bc -l 2>/dev/null)" = "1" ]; then
-        STATUS=1
-    fi
-
-    sname="OK"
-    [ "$STATUS" -eq 2 ] && sname="CRITICAL"
-    [ "$STATUS" -eq 1 ] && sname="WARNING"
+    case "$tc" in
+        ok:*)
+            STATUS=0
+            result="OK"
+            ;;
+        warn:*)
+            STATUS=1
+            result="WARNING"
+            ;;
+        crit:*)
+            STATUS=2
+            result="CRITICAL"
+            ;;
+        *)
+            STATUS=0
+            if [ -n "$CRIT" ] && [ "$CRIT" != "none" ] && [ "$(echo "$tc >= $CRIT" | bc -l 2>/dev/null)" = "1" ]; then
+                STATUS=2
+            elif [ -n "$WARN" ] && [ "$WARN" != "none" ] && [ "$(echo "$tc >= $WARN" | bc -l 2>/dev/null)" = "1" ]; then
+                STATUS=1
+            fi
+            sname="OK"
+            [ "$STATUS" -eq 2 ] && sname="CRITICAL"
+            [ "$STATUS" -eq 1 ] && sname="WARNING"
+            result="${tc}°C (${sname})"
+            ;;
+    esac
 
     [ -n "$OVERALL_OUTPUT" ] && OVERALL_OUTPUT="$OVERALL_OUTPUT, "
-    OVERALL_OUTPUT="${OVERALL_OUTPUT}${label} ${tc}°C (${sname})"
+    OVERALL_OUTPUT="${OVERALL_OUTPUT}${label} ${result}"
 
     [ "$STATUS" -gt "$OVERALL_STATUS" ] && OVERALL_STATUS=$STATUS
 done

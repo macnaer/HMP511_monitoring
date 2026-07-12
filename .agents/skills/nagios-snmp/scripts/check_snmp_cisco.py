@@ -49,6 +49,9 @@ UNKNOWN = 3
 CISCO_OIDS = {
     "temp_alarm": "1.3.6.1.4.1.9.5.1.2.13.0",
     "temp_value": "1.3.6.1.4.1.9.5.1.2.11.0",
+    "temp_status": "1.3.6.1.4.1.9.5.1.2.11.0",
+    "temp_status_table": "1.3.6.1.4.1.9.9.13.1.3.1.3",
+    "temp_status_entity": "1.3.6.1.4.1.9.9.91.1.1.1.1.4",
     "fan_status": "1.3.6.1.4.1.9.9.13.1.4.1.3.1004",
     "psu_status": "1.3.6.1.4.1.9.9.13.1.5.1.3.1003",
     "storage_total": "1.3.6.1.2.1.25.2.3.1.5.3",
@@ -169,6 +172,74 @@ def check_temperature(host, community, version, timeout, warn, crit):
         return OK, "Temperature: %.1fC" % temp_c
     except (ValueError, TypeError):
         return UNKNOWN, "Invalid temperature value: %s" % value
+
+
+def check_temperature_status(host, community, version, timeout):
+    """Check temperature via status code with fallback OIDs and multi-sensor support.
+
+    Status codes: 1=OK (normal), 2=WARNING (slightly heated), 3=CRITICAL (overheated)
+    """
+    sensors = []
+
+    # Strategy 1: Scalar OID (returns 1/2/3 directly)
+    exit_code, value = snmp_get(host, CISCO_OIDS["temp_status"], community, version, timeout)
+    if exit_code == OK:
+        try:
+            status = int(value)
+            if status in (1, 2, 3):
+                sensors.append(("System Temp", status))
+        except (ValueError, TypeError):
+            pass
+
+    # Strategy 2: CISCO-ENVMON-MIB table (may have multiple sensors)
+    if not sensors:
+        exit_code, results = snmp_walk(host, CISCO_OIDS["temp_status_table"], community, version, timeout)
+        if exit_code == OK and results:
+            for idx, value in results:
+                try:
+                    status = int(value)
+                    if status in (1, 2, 3):
+                        sensors.append(("Sensor %s" % idx, status))
+                except (ValueError, TypeError):
+                    continue
+
+    # Strategy 3: CISCO-ENTITY-SENSOR-MIB table
+    if not sensors:
+        exit_code, results = snmp_walk(host, CISCO_OIDS["temp_status_entity"], community, version, timeout)
+        if exit_code == OK and results:
+            for idx, value in results:
+                try:
+                    status = int(value)
+                    if status in (1, 2, 3):
+                        sensors.append(("Entity Sensor %s" % idx, status))
+                except (ValueError, TypeError):
+                    continue
+
+    if not sensors:
+        return UNKNOWN, "Cannot determine temperature status from any OID"
+
+    STATUS_MAP = {
+        1: (OK, "Normal"),
+        2: (WARNING, "Warning"),
+        3: (CRITICAL, "Critical"),
+    }
+
+    overall_status = OK
+    parts = []
+    perfdata_parts = []
+
+    for name, status in sensors:
+        exit_code, label = STATUS_MAP.get(status, (UNKNOWN, "Unknown(%s)" % status))
+        parts.append("%s: %s" % (name, label))
+        perfdata_parts.append("%s=%d;1;3" % (name.lower().replace(" ", "_"), status))
+        if exit_code > overall_status:
+            overall_status = exit_code
+
+    message = ", ".join(parts)
+    perfdata = " | " + " ".join(perfdata_parts)
+
+    STATUS_LABELS = {0: "OK", 1: "WARNING", 2: "CRITICAL", 3: "UNKNOWN"}
+    return overall_status, "%s - %s%s" % (STATUS_LABELS[overall_status], message, perfdata)
 
 
 def check_fan(host, community, version, timeout):
@@ -353,7 +424,7 @@ def main():
     parser = argparse.ArgumentParser(description="Cisco SNMP check for Nagios")
     parser.add_argument("--host", required=True, help="Target host IP or hostname")
     parser.add_argument("--check", required=True,
-                        choices=["temperature", "fan", "psu", "storage", "cpu", "uptime", "interface"],
+                        choices=["temperature", "temperature_status", "fan", "psu", "storage", "cpu", "uptime", "interface"],
                         help="Check type to perform")
     parser.add_argument("--warn", type=none_or_float, default=None, help="Warning threshold")
     parser.add_argument("--crit", type=none_or_float, default=None, help="Critical threshold")
@@ -369,6 +440,7 @@ def main():
     try:
         checks = {
             "temperature": lambda: check_temperature(args.host, args.community, args.version, args.timeout, args.warn, args.crit),
+            "temperature_status": lambda: check_temperature_status(args.host, args.community, args.version, args.timeout),
             "fan": lambda: check_fan(args.host, args.community, args.version, args.timeout),
             "psu": lambda: check_psu(args.host, args.community, args.version, args.timeout),
             "storage": lambda: check_storage(args.host, args.community, args.version, args.timeout, args.warn, args.crit),

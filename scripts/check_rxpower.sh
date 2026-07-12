@@ -89,18 +89,21 @@ if [ -z "$HOST" ] || [ -z "$PORT" ]; then
 fi
 
 SSH_ERR=$(mktemp)
-OUTPUT=$(printf "terminal length 0\nshow interfaces %s transceiver detail\n" "$PORT" | \
-    sshpass -p "$SSH_PASS" ssh \
+SSH_CMDS=$(mktemp)
+printf "terminal length 0\nshow interfaces %s transceiver detail\n" "$PORT" > "$SSH_CMDS"
+
+OUTPUT=$(sshpass -p "$SSH_PASS" ssh \
     -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
-    -o LogLevel=ERROR \
-    "$SSH_USER@$HOST" 2>"$SSH_ERR")
+    "$SSH_USER@$HOST" < "$SSH_CMDS" 2>"$SSH_ERR")
 SSH_RC=$?
+
+rm -f "$SSH_CMDS"
 
 if [ $SSH_RC -ne 0 ] || [ -z "$OUTPUT" ]; then
     SSH_MSG=$(cat "$SSH_ERR" 2>/dev/null | head -5)
     rm -f "$SSH_ERR"
-    echo "CRITICAL - SSH connection failed to $HOST (rc=$SSH_RC: $SSH_MSG)"
+    echo "CRITICAL - SSH failed to $HOST (rc=$SSH_RC: $SSH_MSG)"
     exit $CRITICAL
 fi
 rm -f "$SSH_ERR"

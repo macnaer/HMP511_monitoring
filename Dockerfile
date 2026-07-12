@@ -8,10 +8,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python packages for Nagios checks
-RUN pip3 install --no-cache-dir --break-system-packages \
-    "pyasn1>=0.4.0,<0.5.0" \
-    "pysnmp>=4.2.0,<5.0.0" \
-    psutil>=5.9.0
+COPY requirements.txt /tmp/requirements.txt
+RUN pip3 install --no-cache-dir --break-system-packages -r /tmp/requirements.txt
 
 # Set default SNMP community
 ENV NAGIOS_SNMP_COMMUNITY=LibreNms

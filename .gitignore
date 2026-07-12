@@ -1,3 +1,6 @@
 .env
 __pycache__/
 *.pyc
+plink.exe
+ssh_switch.cmd
+/.env

@@ -230,6 +230,7 @@ def check_temperature_status(host, community, version, timeout):
                 env[k.strip()] = v.strip()
 
     ssh_host = host
+    ssh_port = int(env.get("INTERNAL_PORT", "22"))
     ssh_user = env.get("USRERNAME") or env.get("USERNAME", "")
     ssh_pass = env.get("PASSWORD", "")
 
@@ -241,6 +242,7 @@ def check_temperature_status(host, community, version, timeout):
             [
                 "sshpass", "-p", ssh_pass,
                 "ssh",
+                "-p", str(ssh_port),
                 "-o", "StrictHostKeyChecking=no",
                 "-o", "UserKnownHostsFile=/dev/null",
                 "-o", "LogLevel=ERROR",
@@ -255,7 +257,8 @@ def check_temperature_status(host, community, version, timeout):
         if result.returncode == 3:
             return UNKNOWN, "SSH authentication failed"
         elif result.returncode != 0:
-            return UNKNOWN, "SSH connection failed (exit code %d)" % result.returncode
+            stderr_msg = result.stderr.strip() if result.stderr else "no stderr"
+            return UNKNOWN, "SSH connection failed (exit code %d): %s" % (result.returncode, stderr_msg)
 
         text = result.stdout
 

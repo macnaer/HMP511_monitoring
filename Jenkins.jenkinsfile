@@ -49,9 +49,9 @@ pipeline {
                         docker rmi ${IMAGE_NAME} || true
 
                         echo "📄 Placing .env on the host (chmod 600)..."
-                        sudo mkdir -p /opt/nagios
-                        sudo cp "$ENV_FILE" /opt/nagios/.env
-                        sudo chmod 600 /opt/nagios/.env
+                        mkdir -p "$WORKSPACE/.nagios"
+                        cp "$ENV_FILE" "$WORKSPACE/.nagios/.env"
+                        chmod 600 "$WORKSPACE/.nagios/.env"
 
                         echo "⬇️ Pulling latest Nagios image..."
                         docker pull ${IMAGE_NAME}
@@ -60,7 +60,7 @@ pipeline {
                         docker run -d --name nagios_nmp11   --restart=always \
                             -p 0.0.0.0:81:80 \
                             -v /opt/monitoring_data_demo:/opt/nagios/data:ro \
-                            -v /opt/nagios/.env:/.env:ro \
+                            -v "$WORKSPACE/.nagios/.env:/.env:ro" \
                             ${IMAGE_NAME}
                     '''
                 }

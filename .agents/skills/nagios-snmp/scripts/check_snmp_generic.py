@@ -13,18 +13,19 @@ Exit codes:
 """
 
 import argparse
+import asyncio
 import os
 import sys
 
 try:
-    from pysnmp.hlapi import (
+    from pysnmp.hlapi.v3arch.asyncio import (
         SnmpEngine,
         CommunityData,
         UdpTransportTarget,
         ContextData,
         ObjectType,
         ObjectIdentity,
-        getCmd,
+        get_cmd,
     )
 except ImportError as e:
     print("UNKNOWN - pysnmp import failed: %s" % e)
@@ -37,16 +38,14 @@ CRITICAL = 2
 UNKNOWN = 3
 
 
-def snmp_get(host, oid, community, version, timeout):
+async def snmp_get_async(host, oid, community, version, timeout):
     try:
-        error_indication, error_status, error_index, var_binds = next(
-            getCmd(
-                SnmpEngine(),
-                CommunityData(community, mpModel=1 if version == "1" else 2),
-                UdpTransportTarget((host, 161), timeout=timeout, retries=2),
-                ContextData(),
-                ObjectType(ObjectIdentity(oid)),
-            )
+        error_indication, error_status, error_index, var_binds = await get_cmd(
+            SnmpEngine(),
+            CommunityData(community, mpModel=1 if version == "1" else 2),
+            await UdpTransportTarget.create((host, 161), timeout=timeout, retries=2),
+            ContextData(),
+            ObjectType(ObjectIdentity(oid)),
         )
 
         if error_indication:
@@ -60,6 +59,10 @@ def snmp_get(host, oid, community, version, timeout):
 
     except Exception as e:
         return UNKNOWN, "Exception: %s" % str(e)
+
+
+def snmp_get(host, oid, community, version, timeout):
+    return asyncio.run(snmp_get_async(host, oid, community, version, timeout))
 
 
 def main():

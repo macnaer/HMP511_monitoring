@@ -62,6 +62,8 @@ if [ -z "$SSH_USER" ] || [ -z "$SSH_PASS" ]; then
         env_file="../.env"
     elif [ -f "../../.env" ]; then
         env_file="../../.env"
+    elif [ -f "/.env" ]; then
+        env_file="/.env"
     fi
     if [ -n "$env_file" ]; then
         while IFS='=' read -r key value || [ -n "$key" ]; do

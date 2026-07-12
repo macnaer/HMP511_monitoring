@@ -35,8 +35,8 @@ Access web UI: http://localhost:81/nagios
 | NAGIOS_SNMP_COMMUNITY | SNMP community string | public |
 | NAGIOS_SNMP_VERSION | SNMP version (1, 2c) | 2c |
 | NAGIOS_SNMP_TIMEOUT | Timeout in seconds | 30 |
-| SSH_USER | SSH username for Cisco switch access | - |
-| SSH_PASS | SSH password for Cisco switch access | - |
+| USERNAME | SSH username for Cisco switch access | - |
+| PASSWORD | SSH password for Cisco switch access | - |
 | TELEGRAM_BOT_TOKEN | Telegram bot token | - |
 | TELEGRAM_CHAT_ID | Telegram chat ID | - |
 

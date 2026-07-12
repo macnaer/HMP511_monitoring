@@ -11,7 +11,7 @@
 #
 # Credentials loaded from (in order of precedence):
 #   1. --user / --password CLI flags
-#   2. SSH_USER / SSH_PASS environment variables
+#   2. USERNAME (or USRERNAME) / PASSWORD environment variables
 #   3. .env file in the project root
 
 OK=0

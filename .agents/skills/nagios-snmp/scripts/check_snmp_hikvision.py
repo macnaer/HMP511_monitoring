@@ -24,18 +24,21 @@ import sys
 import traceback
 
 try:
-    from pysnmp.hlapi import (
+    from pysnmp.hlapi.v3arch.asyncio import (
         SnmpEngine,
         CommunityData,
         UdpTransportTarget,
         ContextData,
         ObjectType,
         ObjectIdentity,
-        getCmd,
+        get_cmd,
     )
 except ImportError as e:
     print(f"UNKNOWN - pysnmp import failed: {e}")
     sys.exit(3)
+
+
+import asyncio
 
 
 # Nagios exit codes
@@ -54,15 +57,17 @@ HIKVISION_OIDS = {
 
 
 def snmp_get(host, oid, community, version, timeout):
+    return asyncio.run(_snmp_get_async(host, oid, community, version, timeout))
+
+
+async def _snmp_get_async(host, oid, community, version, timeout):
     try:
-        error_indication, error_status, error_index, var_binds = next(
-            getCmd(
-                SnmpEngine(),
-                CommunityData(community, mpModel=1 if version == "1" else 2),
-                UdpTransportTarget((host, 161), timeout=timeout, retries=2),
-                ContextData(),
-                ObjectType(ObjectIdentity(oid)),
-            )
+        error_indication, error_status, error_index, var_binds = await get_cmd(
+            SnmpEngine(),
+            CommunityData(community, mpModel=1 if version == "1" else 2),
+            await UdpTransportTarget.create((host, 161), timeout=timeout, retries=2),
+            ContextData(),
+            ObjectType(ObjectIdentity(oid)),
         )
 
         if error_indication:

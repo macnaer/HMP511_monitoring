@@ -26,19 +26,22 @@ import os
 import sys
 
 try:
-    from pysnmp.hlapi import (
+    from pysnmp.hlapi.v3arch.asyncio import (
         SnmpEngine,
         CommunityData,
         UdpTransportTarget,
         ContextData,
         ObjectType,
         ObjectIdentity,
-        getCmd,
-        nextCmd,
+        get_cmd,
+        next_cmd,
     )
 except ImportError as e:
     print("UNKNOWN - pysnmp import failed: %s" % e)
     sys.exit(3)
+
+
+import asyncio
 
 
 OK = 0
@@ -88,15 +91,17 @@ def none_or_float(val):
 
 
 def snmp_get(host, oid, community, version, timeout):
+    return asyncio.run(_snmp_get_async(host, oid, community, version, timeout))
+
+
+async def _snmp_get_async(host, oid, community, version, timeout):
     try:
-        error_indication, error_status, error_index, var_binds = next(
-            getCmd(
-                SnmpEngine(),
-                CommunityData(community, mpModel=1 if version == "1" else 2),
-                UdpTransportTarget((host, 161), timeout=timeout, retries=2),
-                ContextData(),
-                ObjectType(ObjectIdentity(oid)),
-            )
+        error_indication, error_status, error_index, var_binds = await get_cmd(
+            SnmpEngine(),
+            CommunityData(community, mpModel=1 if version == "1" else 2),
+            await UdpTransportTarget.create((host, 161), timeout=timeout, retries=2),
+            ContextData(),
+            ObjectType(ObjectIdentity(oid)),
         )
 
         if error_indication:
@@ -114,16 +119,22 @@ def snmp_get(host, oid, community, version, timeout):
 
 def snmp_walk(host, oid, community, version, timeout):
     """SNMP walk a table OID, return (exit_code, list of (index, value))."""
+    return asyncio.run(_snmp_walk_async(host, oid, community, version, timeout))
+
+
+async def _snmp_walk_async(host, oid, community, version, timeout):
+    """SNMP walk a table OID, return (exit_code, list of (index, value))."""
     results = []
     try:
-        for error_indication, error_status, error_index, var_binds in nextCmd(
+        results_data = await next_cmd(
             SnmpEngine(),
             CommunityData(community, mpModel=1 if version == "1" else 2),
-            UdpTransportTarget((host, 161), timeout=timeout, retries=2),
+            await UdpTransportTarget.create((host, 161), timeout=timeout, retries=2),
             ContextData(),
             ObjectType(ObjectIdentity(oid)),
             lexicographicMode=True,
-        ):
+        )
+        for (error_indication, error_status, error_index, var_binds) in results_data:
             if error_indication:
                 return CRITICAL, "SNMP error: %s" % error_indication
             if error_status:

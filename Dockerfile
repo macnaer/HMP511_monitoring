@@ -25,6 +25,7 @@ COPY scripts/ /opt/nagios/etc/scripts/
 COPY .agents/skills/nagios-snmp/scripts/*.py /opt/nagios/etc/scripts/
 COPY .agents/skills/nagios-system/scripts/*.py /opt/nagios/etc/scripts/
 COPY .agents/skills/nagios-network/scripts/*.py /opt/nagios/etc/scripts/
+COPY .agents/skills/cisco-ssh/scripts/*.py /opt/nagios/etc/scripts/
 
 # Set permissions
 RUN chown -R nagios:nagios /opt/nagios/etc \

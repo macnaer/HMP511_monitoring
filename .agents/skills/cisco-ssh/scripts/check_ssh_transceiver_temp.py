@@ -172,18 +172,40 @@ def main():
     parser = argparse.ArgumentParser(description="SFP transceiver temperature check for Nagios (SSH)")
     parser.add_argument("--interface", default="GigabitEthernet0/45",
                         help="Interface name (default: GigabitEthernet0/45)")
-    parser.add_argument("--host", help="Device IP (overrides .env INTERNAL_IP)")
-    parser.add_argument("--port", type=int, default=None, help="SSH port (overrides .env)")
-    parser.add_argument("--user", help="SSH username (overrides .env)")
-    parser.add_argument("--password", help="SSH password (overrides .env)")
+    parser.add_argument("--host", help="Device IP (overrides env/ .env)")
+    parser.add_argument("--port", type=int, default=None, help="SSH port (overrides env/ .env)")
+    parser.add_argument("--user", help="SSH username (overrides env/ .env)")
+    parser.add_argument("--password", help="SSH password (overrides env/ .env)")
     parser.add_argument("--timeout", type=int, default=15, help="Connection/command timeout")
     args = parser.parse_args()
 
-    creds = load_env()
-    host = args.host or creds["internal_ip"]
-    port = args.port or creds["internal_port"]
-    username = args.user or creds["username"]
-    password = args.password or creds["password"]
+    # Credentials priority: CLI args > env vars > .env file
+    env_host = os.environ.get("SSH_HOST") or os.environ.get("INTERNAL_IP")
+    env_port = os.environ.get("SSH_PORT") or os.environ.get("INTERNAL_PORT")
+    env_user = os.environ.get("SSH_USER") or os.environ.get("USERNAME") or os.environ.get("USRERNAME")
+    env_pass = os.environ.get("SSH_PASSWORD") or os.environ.get("PASSWORD")
+
+    creds = {}
+    if env_user and env_pass:
+        creds["host"] = env_host
+        creds["port"] = int(env_port) if env_port else 22
+        creds["username"] = env_user
+        creds["password"] = env_pass
+    else:
+        creds = load_env()
+
+    host = args.host or creds.get("host") or creds.get("internal_ip")
+    port = args.port or creds.get("port") or creds.get("internal_port", 22)
+    username = args.user or creds.get("username")
+    password = args.password or creds.get("password")
+
+    if not username or not password:
+        print("UNKNOWN - SSH credentials not found. Set SSH_USER/SSH_PASSWORD env vars, --user/--password flags, or .env file.")
+        sys.exit(UNKNOWN)
+
+    if not host:
+        print("UNKNOWN - Host not specified. Use --host, SSH_HOST env var, or INTERNAL_IP in .env")
+        sys.exit(UNKNOWN)
 
     exit_code, message = check_temperature(host, port, username, password, args.interface, args.timeout)
 

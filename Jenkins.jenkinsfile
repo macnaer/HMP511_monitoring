@@ -51,7 +51,7 @@ pipeline {
                         echo "📄 Placing .env on the host (chmod 600)..."
                         mkdir -p "$WORKSPACE/.nagios"
                         cp "$ENV_FILE" "$WORKSPACE/.nagios/.env"
-                        chmod 600 "$WORKSPACE/.nagios/.env"
+                        chmod 644 "$WORKSPACE/.nagios/.env"
 
                         echo "⬇️ Pulling latest Nagios image..."
                         docker pull ${IMAGE_NAME}

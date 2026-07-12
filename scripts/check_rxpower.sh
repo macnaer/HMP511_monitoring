@@ -94,7 +94,7 @@ OUTPUT=$(sshpass -p "$SSH_PASS" ssh \
     -o UserKnownHostsFile=/dev/null \
     -p "$SSH_PORT" \
     "$SSH_USER@$HOST" \
-    "terminal length 0; show interfaces $PORT transceiver detail" 2>/dev/null)
+    "show interfaces $PORT transceiver detail" 2>/dev/null)
 
 if [ $? -ne 0 ] || [ -z "$OUTPUT" ]; then
     echo "CRITICAL - SSH connection failed to $HOST"

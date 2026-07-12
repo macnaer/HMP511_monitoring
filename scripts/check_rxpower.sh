@@ -92,16 +92,17 @@ SSH_ERR=$(mktemp)
 SSH_CMDS=$(mktemp)
 printf "terminal length 0\nshow interfaces %s transceiver detail\n" "$PORT" > "$SSH_CMDS"
 
-OUTPUT=$(sshpass -p "$SSH_PASS" ssh \
+sshpass -p "$SSH_PASS" ssh \
     -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
-    "$SSH_USER@$HOST" < "$SSH_CMDS" 2>"$SSH_ERR")
+    "$SSH_USER@$HOST" < "$SSH_CMDS" > "$SSH_ERR" 2>&1
 SSH_RC=$?
+OUTPUT=$(cat "$SSH_ERR")
 
 rm -f "$SSH_CMDS"
 
 if [ $SSH_RC -ne 0 ] || [ -z "$OUTPUT" ]; then
-    SSH_MSG=$(cat "$SSH_ERR" 2>/dev/null | head -5)
+    SSH_MSG=$(cat "$SSH_ERR" 2>/dev/null | tail -10)
     rm -f "$SSH_ERR"
     echo "CRITICAL - SSH failed to $HOST (rc=$SSH_RC: $SSH_MSG)"
     exit $CRITICAL

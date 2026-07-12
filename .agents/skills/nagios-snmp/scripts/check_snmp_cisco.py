@@ -6,7 +6,8 @@ Usage:
     check_snmp_cisco.py --host HOST --check CHECK [--warn WARN] [--crit CRIT] [--interface INTERFACE]
 
 Available checks:
-    temperature  - System temperature
+    temperature  - System temperature (SNMP)
+    temperature_status - Transceiver temperature in Celsius (SSH)
     fan          - Fan status
     psu          - Power supply status
     storage      - Flash/storage usage percentage
@@ -22,19 +23,22 @@ Exit codes:
 """
 
 import argparse
+import asyncio
 import os
+import re
 import sys
+import time
 
 try:
-    from pysnmp.hlapi import (
+    from pysnmp.hlapi.v3arch.asyncio import (
         SnmpEngine,
         CommunityData,
         UdpTransportTarget,
         ContextData,
         ObjectType,
         ObjectIdentity,
-        getCmd,
-        nextCmd,
+        get_cmd,
+        next_cmd,
     )
 except ImportError as e:
     print("UNKNOWN - pysnmp import failed: %s" % e)
@@ -49,6 +53,9 @@ UNKNOWN = 3
 CISCO_OIDS = {
     "temp_alarm": "1.3.6.1.4.1.9.5.1.2.13.0",
     "temp_value": "1.3.6.1.4.1.9.5.1.2.11.0",
+    "temp_status": "1.3.6.1.4.1.9.5.1.2.11.0",
+    "temp_status_table": "1.3.6.1.4.1.9.9.13.1.3.1.3",
+    "temp_status_entity": "1.3.6.1.4.1.9.9.91.1.1.1.1.4",
     "fan_status": "1.3.6.1.4.1.9.9.13.1.4.1.3.1004",
     "psu_status": "1.3.6.1.4.1.9.9.13.1.5.1.3.1003",
     "storage_total": "1.3.6.1.2.1.25.2.3.1.5.3",
@@ -88,15 +95,17 @@ def none_or_float(val):
 
 
 def snmp_get(host, oid, community, version, timeout):
+    return asyncio.run(_snmp_get_async(host, oid, community, version, timeout))
+
+
+async def _snmp_get_async(host, oid, community, version, timeout):
     try:
-        error_indication, error_status, error_index, var_binds = next(
-            getCmd(
-                SnmpEngine(),
-                CommunityData(community, mpModel=1 if version == "1" else 2),
-                UdpTransportTarget((host, 161), timeout=timeout, retries=2),
-                ContextData(),
-                ObjectType(ObjectIdentity(oid)),
-            )
+        error_indication, error_status, error_index, var_binds = await get_cmd(
+            SnmpEngine(),
+            CommunityData(community),
+            await UdpTransportTarget.create((host, 161), timeout=timeout, retries=2),
+            ContextData(),
+            ObjectType(ObjectIdentity(oid)),
         )
 
         if error_indication:
@@ -114,30 +123,58 @@ def snmp_get(host, oid, community, version, timeout):
 
 def snmp_walk(host, oid, community, version, timeout):
     """SNMP walk a table OID, return (exit_code, list of (index, value))."""
+    return asyncio.run(_snmp_walk_async(host, oid, community, version, timeout))
+
+
+async def _snmp_walk_async(host, oid, community, version, timeout):
+    """SNMP walk a table OID, return (exit_code, list of (index, value)).
+
+    Compatible with pysnmp 7.x where next_cmd returns a single tuple.
+    """
     results = []
     try:
-        for error_indication, error_status, error_index, var_binds in nextCmd(
-            SnmpEngine(),
-            CommunityData(community, mpModel=1 if version == "1" else 2),
-            UdpTransportTarget((host, 161), timeout=timeout, retries=2),
-            ContextData(),
-            ObjectType(ObjectIdentity(oid)),
-            lexicographicMode=True,
-        ):
+        current_oid = oid
+        max_iterations = 200
+
+        for _ in range(max_iterations):
+            error_indication, error_status, error_index, var_binds = await next_cmd(
+                SnmpEngine(),
+                CommunityData(community),
+                await UdpTransportTarget.create((host, 161), timeout=timeout, retries=2),
+                ContextData(),
+                ObjectType(ObjectIdentity(current_oid)),
+                lexicographicMode=True,
+            )
+
             if error_indication:
                 return CRITICAL, "SNMP error: %s" % error_indication
             if error_status:
+                if error_status.prettyPrint() == "noSuchName":
+                    break
                 return CRITICAL, "SNMP error: %s" % error_status.prettyPrint()
 
+            if not var_binds:
+                break
+
+            reached_end = False
             for var_bind in var_binds:
                 oid_full, value = var_bind
-                oid_str = oid_full.prettyPrint()
+                oid_str = str(oid_full)
+
+                if not oid_str.startswith(oid):
+                    reached_end = True
+                    break
+
                 idx_str = oid_str.rsplit(".", 1)[-1]
                 try:
                     idx = int(idx_str)
                 except ValueError:
                     idx = idx_str
                 results.append((idx, value.prettyPrint()))
+                current_oid = oid_str
+
+            if reached_end:
+                break
 
         return OK, results
     except Exception as e:
@@ -169,6 +206,139 @@ def check_temperature(host, community, version, timeout, warn, crit):
         return OK, "Temperature: %.1fC" % temp_c
     except (ValueError, TypeError):
         return UNKNOWN, "Invalid temperature value: %s" % value
+
+
+def check_temperature_status(host, community, version, timeout):
+    """Check transceiver temperature via SSH and show real Celsius values.
+
+    Connects to the switch via SSH, runs 'show interfaces transceiver detail',
+    parses temperature/power values, and reports them with Nagios thresholds.
+    Falls back to SNMP if SSH is unavailable.
+    """
+    try:
+        import paramiko
+    except ImportError:
+        return UNKNOWN, "paramiko not installed (pip install paramiko)"
+
+    # Read SSH credentials from .env
+    env = {}
+    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..", ".env")
+    if os.path.exists(env_path):
+        with open(env_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                env[k.strip()] = v.strip()
+
+    ssh_host = host
+    ssh_port = int(env.get("INTERNAL_PORT", "22"))
+    ssh_user = env.get("USRERNAME") or env.get("USERNAME", "")
+    ssh_pass = env.get("PASSWORD", "")
+
+    if not ssh_user or not ssh_pass:
+        return UNKNOWN, "SSH credentials not found in .env"
+
+    try:
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(ssh_host, port=ssh_port, username=ssh_user, password=ssh_pass, timeout=10,
+                       allow_agent=False, look_for_keys=False)
+
+        shell = client.invoke_shell()
+        time.sleep(1)
+        if shell.recv_ready():
+            shell.recv(65535)
+
+        shell.send("terminal length 0\n")
+        time.sleep(0.5)
+        if shell.recv_ready():
+            shell.recv(65535)
+
+        shell.send("show interfaces transceiver detail\n")
+        time.sleep(3)
+
+        output = b""
+        end_time = time.time() + 10
+        while time.time() < end_time:
+            if shell.recv_ready():
+                output += shell.recv(65535)
+                if output.endswith(b"#" ) or output.endswith(b"> "):
+                    break
+            else:
+                time.sleep(0.3)
+
+        shell.close()
+        client.close()
+
+        text = output.decode("utf-8", errors="ignore")
+
+    except paramiko.AuthenticationException:
+        return UNKNOWN, "SSH authentication failed"
+    except Exception as e:
+        return UNKNOWN, "SSH error: %s" % str(e)
+
+    # Parse section-by-section to only get Temperature (Celsius), not Voltage/power
+    transceivers = []
+    lines = text.split("\n")
+    in_temp_section = False
+    found_header = False
+
+    for line in lines:
+        stripped = line.strip().replace("\r", "")
+        if "Temperature" in stripped:
+            found_header = True
+            continue
+        if found_header and "Celsius" in stripped:
+            in_temp_section = True
+            found_header = False
+            continue
+        if in_temp_section and "---" in stripped:
+            continue
+        if in_temp_section and stripped.startswith("Gi"):
+            parts = stripped.split()
+            if len(parts) >= 2:
+                try:
+                    port = parts[0]
+                    temp_c = float(parts[1])
+                    alarm_high = float(parts[2]) if len(parts) > 2 else 85.0
+                    warn_high = float(parts[3]) if len(parts) > 3 else 80.0
+                    transceivers.append((port, temp_c, alarm_high, warn_high))
+                except (ValueError, IndexError):
+                    pass
+        elif in_temp_section and stripped and not stripped.startswith("Gi"):
+            in_temp_section = False
+            found_header = False
+
+    if not transceivers:
+        return UNKNOWN, "Cannot parse transceiver temperature from CLI output"
+
+    # Build Nagios perfdata with thresholds from device
+    overall_status = OK
+    parts = []
+    perfdata_parts = []
+
+    for port, temp_c, alarm_high, warn_high in transceivers:
+        port_status = OK
+
+        if temp_c >= alarm_high:
+            port_status = CRITICAL
+        elif temp_c >= warn_high:
+            port_status = WARNING
+
+        parts.append("%s: %.1fC" % (port, temp_c))
+        perfdata_parts.append("%s=%.1f;%s;%s" % (port.replace("/", "_"), temp_c, warn_high, alarm_high))
+
+        if port_status > overall_status:
+            overall_status = port_status
+
+    message = ", ".join(parts)
+    if perfdata_parts:
+        message += " | " + " ".join(perfdata_parts)
+
+    STATUS_LABELS = {0: "OK", 1: "WARNING", 2: "CRITICAL", 3: "UNKNOWN"}
+    return overall_status, "Transceiver temp: %s" % message
 
 
 def check_fan(host, community, version, timeout):
@@ -353,7 +523,7 @@ def main():
     parser = argparse.ArgumentParser(description="Cisco SNMP check for Nagios")
     parser.add_argument("--host", required=True, help="Target host IP or hostname")
     parser.add_argument("--check", required=True,
-                        choices=["temperature", "fan", "psu", "storage", "cpu", "uptime", "interface"],
+                        choices=["temperature", "temperature_status", "fan", "psu", "storage", "cpu", "uptime", "interface"],
                         help="Check type to perform")
     parser.add_argument("--warn", type=none_or_float, default=None, help="Warning threshold")
     parser.add_argument("--crit", type=none_or_float, default=None, help="Critical threshold")
@@ -369,6 +539,7 @@ def main():
     try:
         checks = {
             "temperature": lambda: check_temperature(args.host, args.community, args.version, args.timeout, args.warn, args.crit),
+            "temperature_status": lambda: check_temperature_status(args.host, args.community, args.version, args.timeout),
             "fan": lambda: check_fan(args.host, args.community, args.version, args.timeout),
             "psu": lambda: check_psu(args.host, args.community, args.version, args.timeout),
             "storage": lambda: check_storage(args.host, args.community, args.version, args.timeout, args.warn, args.crit),

@@ -4,11 +4,13 @@ FROM jasonrivers/nagios:latest
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
+    sshpass \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python packages for Nagios checks
-RUN pip3 install --break-system-packages \
-    pysnmp-lextudio \
+RUN pip3 install --no-cache-dir --break-system-packages \
+    "pyasn1>=0.5.0" \
+    "pysnmp>=5.0.0" \
     psutil>=5.9.0
 
 # Set default SNMP community

@@ -24,18 +24,21 @@ import sys
 import traceback
 
 try:
-    from pysnmp.hlapi import (
+    from pysnmp.hlapi.v3arch.asyncio import (
         SnmpEngine,
         CommunityData,
         UdpTransportTarget,
         ContextData,
         ObjectType,
         ObjectIdentity,
-        getCmd,
+        get_cmd,
     )
 except ImportError as e:
     print(f"UNKNOWN - pysnmp import failed: {e}")
     sys.exit(3)
+
+
+import asyncio
 
 
 # Nagios exit codes
@@ -54,15 +57,17 @@ HIKVISION_OIDS = {
 
 
 def snmp_get(host, oid, community, version, timeout):
+    return asyncio.run(_snmp_get_async(host, oid, community, version, timeout))
+
+
+async def _snmp_get_async(host, oid, community, version, timeout):
     try:
-        error_indication, error_status, error_index, var_binds = next(
-            getCmd(
-                SnmpEngine(),
-                CommunityData(community, mpModel=1 if version == "1" else 2),
-                UdpTransportTarget((host, 161), timeout=timeout, retries=2),
-                ContextData(),
-                ObjectType(ObjectIdentity(oid)),
-            )
+        error_indication, error_status, error_index, var_binds = await get_cmd(
+            SnmpEngine(),
+            CommunityData(community, mpModel=1 if version == "1" else 2),
+            await UdpTransportTarget.create((host, 161), timeout=timeout, retries=2),
+            ContextData(),
+            ObjectType(ObjectIdentity(oid)),
         )
 
         if error_indication:
@@ -153,8 +158,8 @@ def main():
     parser.add_argument("--host", required=True, help="Target host IP or hostname")
     parser.add_argument("--check", required=True, choices=["uptime", "temperature", "storage", "time"],
                         help="Check type to perform")
-    parser.add_argument("--warn", type=float, default=None, help="Warning threshold")
-    parser.add_argument("--crit", type=float, default=None, help="Critical threshold")
+    parser.add_argument("--warn", type=float, nargs='?', const=None, default=None, help="Warning threshold")
+    parser.add_argument("--crit", type=float, nargs='?', const=None, default=None, help="Critical threshold")
     parser.add_argument("--community", default=os.environ.get("NAGIOS_SNMP_COMMUNITY", "public"),
                         help="SNMP community string")
     parser.add_argument("--version", default=os.environ.get("NAGIOS_SNMP_VERSION", "2c"),

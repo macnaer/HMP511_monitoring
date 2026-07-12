@@ -27,7 +27,7 @@ import asyncio
 import os
 import re
 import sys
-import time
+
 
 try:
     from pysnmp.hlapi.v3arch.asyncio import (
@@ -211,14 +211,11 @@ def check_temperature(host, community, version, timeout, warn, crit):
 def check_temperature_status(host, community, version, timeout):
     """Check transceiver temperature via SSH and show real Celsius values.
 
-    Connects to the switch via SSH, runs 'show interfaces transceiver detail',
+    Connects to the switch via sshpass+SSH, runs 'show interfaces transceiver detail',
     parses temperature/power values, and reports them with Nagios thresholds.
-    Falls back to SNMP if SSH is unavailable.
+    Uses sshpass + subprocess to avoid paramiko kex compatibility issues with old Cisco IOS.
     """
-    try:
-        import paramiko
-    except ImportError:
-        return UNKNOWN, "paramiko not installed (pip install paramiko)"
+    import subprocess
 
     # Read SSH credentials from .env
     env = {}
@@ -233,7 +230,6 @@ def check_temperature_status(host, community, version, timeout):
                 env[k.strip()] = v.strip()
 
     ssh_host = host
-    ssh_port = int(env.get("INTERNAL_PORT", "22"))
     ssh_user = env.get("USRERNAME") or env.get("USERNAME", "")
     ssh_pass = env.get("PASSWORD", "")
 
@@ -241,41 +237,32 @@ def check_temperature_status(host, community, version, timeout):
         return UNKNOWN, "SSH credentials not found in .env"
 
     try:
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        client.connect(ssh_host, port=ssh_port, username=ssh_user, password=ssh_pass, timeout=10,
-                       allow_agent=False, look_for_keys=False)
+        result = subprocess.run(
+            [
+                "sshpass", "-p", ssh_pass,
+                "ssh",
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "UserKnownHostsFile=/dev/null",
+                "-o", "LogLevel=ERROR",
+                f"{ssh_user}@{ssh_host}",
+            ],
+            input="terminal length 0\nshow interfaces transceiver detail\n",
+            capture_output=True,
+            timeout=timeout,
+            text=True,
+        )
 
-        shell = client.invoke_shell()
-        time.sleep(1)
-        if shell.recv_ready():
-            shell.recv(65535)
+        if result.returncode == 3:
+            return UNKNOWN, "SSH authentication failed"
+        elif result.returncode != 0:
+            return UNKNOWN, "SSH connection failed (exit code %d)" % result.returncode
 
-        shell.send("terminal length 0\n")
-        time.sleep(0.5)
-        if shell.recv_ready():
-            shell.recv(65535)
+        text = result.stdout
 
-        shell.send("show interfaces transceiver detail\n")
-        time.sleep(3)
-
-        output = b""
-        end_time = time.time() + 10
-        while time.time() < end_time:
-            if shell.recv_ready():
-                output += shell.recv(65535)
-                if output.endswith(b"#" ) or output.endswith(b"> "):
-                    break
-            else:
-                time.sleep(0.3)
-
-        shell.close()
-        client.close()
-
-        text = output.decode("utf-8", errors="ignore")
-
-    except paramiko.AuthenticationException:
-        return UNKNOWN, "SSH authentication failed"
+    except FileNotFoundError:
+        return UNKNOWN, "sshpass not installed (apt install sshpass)"
+    except subprocess.TimeoutExpired:
+        return UNKNOWN, "SSH connection timed out"
     except Exception as e:
         return UNKNOWN, "SSH error: %s" % str(e)
 

@@ -49,9 +49,9 @@ pipeline {
                         docker rmi ${IMAGE_NAME} || true
 
                         echo "📄 Placing .env on the host (chmod 600)..."
-                        mkdir -p /opt/nagios
-                        cp "$ENV_FILE" /opt/nagios/.env
-                        chmod 600 /opt/nagios/.env
+                        sudo mkdir -p /opt/nagios
+                        sudo cp "$ENV_FILE" /opt/nagios/.env
+                        sudo chmod 600 /opt/nagios/.env
 
                         echo "⬇️ Pulling latest Nagios image..."
                         docker pull ${IMAGE_NAME}

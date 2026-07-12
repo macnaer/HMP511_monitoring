@@ -21,6 +21,8 @@ Exit codes:
 import argparse
 import os
 import re
+import shutil
+import subprocess
 import sys
 import time
 import warnings
@@ -34,20 +36,6 @@ OK = 0
 WARNING = 1
 CRITICAL = 2
 UNKNOWN = 3
-
-
-def enable_legacy_kex():
-    try:
-        import paramiko
-        available = set(paramiko.Transport._preferred_kex)
-        legacy = {"diffie-hellman-group14-sha1", "diffie-hellman-group-exchange-sha1",
-                  "diffie-hellman-group1-sha1", "ecdh-sha2-nistp256",
-                  "diffie-hellman-group14-sha256", "diffie-hellman-group-exchange-sha256",
-                  "diffie-hellman-group16-sha512"}
-        merged = list(dict.fromkeys([k for k in (list(legacy & available) + list(available))]))
-        paramiko.Transport._preferred_kex = tuple(merged)
-    except (ImportError, AttributeError):
-        pass
 
 
 def parse_transceiver_output(output: str) -> dict:
@@ -81,10 +69,53 @@ def parse_transceiver_output(output: str) -> dict:
     return data
 
 
-def run_ssh_command(host, port, username, password, interface, timeout=15):
+def run_ssh_command_via_sshpass(host, port, username, password, interface, timeout=15):
+    cmd = (
+        f"terminal length 0; show interfaces {interface} transceiver detail"
+    )
+    ssh_args = [
+        "sshpass", "-p", password, "ssh",
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "ConnectTimeout=10",
+        "-o", "KexAlgorithms=+diffie-hellman-group1-sha1,diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha1",
+        "-p", str(port),
+        f"{username}@{host}",
+        cmd,
+    ]
+    try:
+        result = subprocess.run(
+            ssh_args,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        if result.returncode != 0:
+            err = result.stderr.strip() or result.stdout.strip() or f"sshpass exited with code {result.returncode}"
+            return CRITICAL, f"SSH error: {err}"
+        return OK, result.stdout
+    except subprocess.TimeoutExpired:
+        return CRITICAL, f"SSH timeout after {timeout}s"
+    except FileNotFoundError:
+        return CRITICAL, "sshpass not found"
+    except Exception as e:
+        return CRITICAL, f"SSH error: {type(e).__name__}: {e}"
+
+
+def run_ssh_command_via_paramiko(host, port, username, password, interface, timeout=15):
     import paramiko
 
-    enable_legacy_kex()
+    try:
+        import paramiko
+        available = set(paramiko.Transport._preferred_kex)
+        legacy = {"diffie-hellman-group14-sha1", "diffie-hellman-group-exchange-sha1",
+                  "diffie-hellman-group1-sha1", "ecdh-sha2-nistp256",
+                  "diffie-hellman-group14-sha256", "diffie-hellman-group-exchange-sha256",
+                  "diffie-hellman-group16-sha512"}
+        merged = list(dict.fromkeys([k for k in (list(legacy & available) + list(available))]))
+        paramiko.Transport._preferred_kex = tuple(merged)
+    except (ImportError, AttributeError):
+        pass
 
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -136,6 +167,15 @@ def run_ssh_command(host, port, username, password, interface, timeout=15):
         except Exception:
             pass
         return CRITICAL, f"Execution error: {type(e).__name__}: {e}"
+
+
+def run_ssh_command(host, port, username, password, interface, timeout=15):
+    if shutil.which("sshpass"):
+        code, msg = run_ssh_command_via_sshpass(host, port, username, password, interface, timeout)
+        if code == OK or code == CRITICAL:
+            return code, msg
+        return code, msg
+    return run_ssh_command_via_paramiko(host, port, username, password, interface, timeout)
 
 
 def check_temperature(host, port, username, password, interface, timeout):

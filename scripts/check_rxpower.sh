@@ -89,14 +89,12 @@ if [ -z "$HOST" ] || [ -z "$PORT" ]; then
 fi
 
 SSH_ERR=$(mktemp)
-OUTPUT=$(sshpass -p "$SSH_PASS" ssh \
+OUTPUT=$(printf "terminal length 0\nshow interfaces %s transceiver detail\n" "$PORT" | \
+    sshpass -p "$SSH_PASS" ssh \
     -o StrictHostKeyChecking=no \
-    -o ConnectTimeout=10 \
     -o UserKnownHostsFile=/dev/null \
-    -o KexAlgorithms=+diffie-hellman-group1-sha1,diffie-hellman-group14-sha1 \
-    -p "$SSH_PORT" \
-    "$SSH_USER@$HOST" \
-    "show interfaces $PORT transceiver detail" 2>"$SSH_ERR")
+    -o LogLevel=ERROR \
+    "$SSH_USER@$HOST" 2>"$SSH_ERR")
 SSH_RC=$?
 
 if [ $SSH_RC -ne 0 ] || [ -z "$OUTPUT" ]; then

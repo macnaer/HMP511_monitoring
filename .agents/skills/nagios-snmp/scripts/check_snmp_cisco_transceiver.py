@@ -93,7 +93,7 @@ async def snmp_get(host, oid, community, version, timeout):
     try:
         error_indication, error_status, error_index, var_binds = await get_cmd(
             SnmpEngine(),
-            CommunityData(community, mpModel=1 if version == "1" else 2),
+            CommunityData(community),
             await UdpTransportTarget.create((host, 161), timeout=timeout, retries=2),
             ContextData(),
             ObjectType(ObjectIdentity(oid)),
@@ -112,26 +112,46 @@ async def snmp_get(host, oid, community, version, timeout):
 async def snmp_walk(host, oid, community, version, timeout):
     results = []
     try:
-        async for (error_indication, error_status, error_index, var_binds) in next_cmd(
-            SnmpEngine(),
-            CommunityData(community, mpModel=1 if version == "1" else 2),
-            await UdpTransportTarget.create((host, 161), timeout=timeout, retries=2),
-            ContextData(),
-            ObjectType(ObjectIdentity(oid)),
-            lexicographicMode=True,
-        ):
+        current_oid = oid
+        max_iterations = 200
+
+        for _ in range(max_iterations):
+            error_indication, error_status, error_index, var_binds = await next_cmd(
+                SnmpEngine(),
+                CommunityData(community),
+                await UdpTransportTarget.create((host, 161), timeout=timeout, retries=2),
+                ContextData(),
+                ObjectType(ObjectIdentity(current_oid)),
+                lexicographicMode=True,
+            )
+
             if error_indication:
                 return CRITICAL, "SNMP error: %s" % error_indication, []
             if error_status:
+                if error_status.prettyPrint() == "noSuchName":
+                    break
                 return CRITICAL, "SNMP error: %s" % error_status.prettyPrint(), []
+            if not var_binds:
+                break
+
+            reached_end = False
             for var_bind in var_binds:
-                oid_str = var_bind[0].prettyPrint()
+                oid_full, value = var_bind
+                oid_str = str(oid_full)
+                if not oid_str.startswith(oid):
+                    reached_end = True
+                    break
                 idx_str = oid_str.rsplit(".", 1)[-1]
                 try:
                     idx = int(idx_str)
                 except ValueError:
                     idx = idx_str
-                results.append((idx, var_bind[1].prettyPrint()))
+                results.append((idx, value.prettyPrint()))
+                current_oid = oid_str
+
+            if reached_end:
+                break
+
         return OK, "", results
     except Exception as e:
         return UNKNOWN, "Exception: %s" % str(e), []

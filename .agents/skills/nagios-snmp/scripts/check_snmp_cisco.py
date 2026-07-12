@@ -6,7 +6,8 @@ Usage:
     check_snmp_cisco.py --host HOST --check CHECK [--warn WARN] [--crit CRIT] [--interface INTERFACE]
 
 Available checks:
-    temperature  - System temperature
+    temperature  - System temperature (SNMP)
+    temperature_status - Transceiver temperature in Celsius (SSH)
     fan          - Fan status
     psu          - Power supply status
     storage      - Flash/storage usage percentage
@@ -22,8 +23,11 @@ Exit codes:
 """
 
 import argparse
+import asyncio
 import os
+import re
 import sys
+import time
 
 try:
     from pysnmp.hlapi.v3arch.asyncio import (
@@ -39,9 +43,6 @@ try:
 except ImportError as e:
     print("UNKNOWN - pysnmp import failed: %s" % e)
     sys.exit(3)
-
-
-import asyncio
 
 
 OK = 0
@@ -101,7 +102,7 @@ async def _snmp_get_async(host, oid, community, version, timeout):
     try:
         error_indication, error_status, error_index, var_binds = await get_cmd(
             SnmpEngine(),
-            CommunityData(community, mpModel=1 if version == "1" else 2),
+            CommunityData(community),
             await UdpTransportTarget.create((host, 161), timeout=timeout, retries=2),
             ContextData(),
             ObjectType(ObjectIdentity(oid)),
@@ -126,32 +127,54 @@ def snmp_walk(host, oid, community, version, timeout):
 
 
 async def _snmp_walk_async(host, oid, community, version, timeout):
-    """SNMP walk a table OID, return (exit_code, list of (index, value))."""
+    """SNMP walk a table OID, return (exit_code, list of (index, value)).
+
+    Compatible with pysnmp 7.x where next_cmd returns a single tuple.
+    """
     results = []
     try:
-        results_data = await next_cmd(
-            SnmpEngine(),
-            CommunityData(community, mpModel=1 if version == "1" else 2),
-            await UdpTransportTarget.create((host, 161), timeout=timeout, retries=2),
-            ContextData(),
-            ObjectType(ObjectIdentity(oid)),
-            lexicographicMode=True,
-        )
-        for (error_indication, error_status, error_index, var_binds) in results_data:
+        current_oid = oid
+        max_iterations = 200
+
+        for _ in range(max_iterations):
+            error_indication, error_status, error_index, var_binds = await next_cmd(
+                SnmpEngine(),
+                CommunityData(community),
+                await UdpTransportTarget.create((host, 161), timeout=timeout, retries=2),
+                ContextData(),
+                ObjectType(ObjectIdentity(current_oid)),
+                lexicographicMode=True,
+            )
+
             if error_indication:
                 return CRITICAL, "SNMP error: %s" % error_indication
             if error_status:
+                if error_status.prettyPrint() == "noSuchName":
+                    break
                 return CRITICAL, "SNMP error: %s" % error_status.prettyPrint()
 
+            if not var_binds:
+                break
+
+            reached_end = False
             for var_bind in var_binds:
                 oid_full, value = var_bind
-                oid_str = oid_full.prettyPrint()
+                oid_str = str(oid_full)
+
+                if not oid_str.startswith(oid):
+                    reached_end = True
+                    break
+
                 idx_str = oid_str.rsplit(".", 1)[-1]
                 try:
                     idx = int(idx_str)
                 except ValueError:
                     idx = idx_str
                 results.append((idx, value.prettyPrint()))
+                current_oid = oid_str
+
+            if reached_end:
+                break
 
         return OK, results
     except Exception as e:
@@ -186,71 +209,136 @@ def check_temperature(host, community, version, timeout, warn, crit):
 
 
 def check_temperature_status(host, community, version, timeout):
-    """Check temperature via status code with fallback OIDs and multi-sensor support.
+    """Check transceiver temperature via SSH and show real Celsius values.
 
-    Status codes: 1=OK (normal), 2=WARNING (slightly heated), 3=CRITICAL (overheated)
+    Connects to the switch via SSH, runs 'show interfaces transceiver detail',
+    parses temperature/power values, and reports them with Nagios thresholds.
+    Falls back to SNMP if SSH is unavailable.
     """
-    sensors = []
+    try:
+        import paramiko
+    except ImportError:
+        return UNKNOWN, "paramiko not installed (pip install paramiko)"
 
-    # Strategy 1: Scalar OID (returns 1/2/3 directly)
-    exit_code, value = snmp_get(host, CISCO_OIDS["temp_status"], community, version, timeout)
-    if exit_code == OK:
-        try:
-            status = int(value)
-            if status in (1, 2, 3):
-                sensors.append(("System Temp", status))
-        except (ValueError, TypeError):
-            pass
-
-    # Strategy 2: CISCO-ENVMON-MIB table (may have multiple sensors)
-    if not sensors:
-        exit_code, results = snmp_walk(host, CISCO_OIDS["temp_status_table"], community, version, timeout)
-        if exit_code == OK and results:
-            for idx, value in results:
-                try:
-                    status = int(value)
-                    if status in (1, 2, 3):
-                        sensors.append(("Sensor %s" % idx, status))
-                except (ValueError, TypeError):
+    # Read SSH credentials from .env
+    env = {}
+    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..", ".env")
+    if os.path.exists(env_path):
+        with open(env_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
                     continue
+                k, _, v = line.partition("=")
+                env[k.strip()] = v.strip()
 
-    # Strategy 3: CISCO-ENTITY-SENSOR-MIB table
-    if not sensors:
-        exit_code, results = snmp_walk(host, CISCO_OIDS["temp_status_entity"], community, version, timeout)
-        if exit_code == OK and results:
-            for idx, value in results:
+    ssh_host = host
+    ssh_port = int(env.get("INTERNAL_PORT", "22"))
+    ssh_user = env.get("USRERNAME") or env.get("USERNAME", "")
+    ssh_pass = env.get("PASSWORD", "")
+
+    if not ssh_user or not ssh_pass:
+        return UNKNOWN, "SSH credentials not found in .env"
+
+    try:
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(ssh_host, port=ssh_port, username=ssh_user, password=ssh_pass, timeout=10,
+                       allow_agent=False, look_for_keys=False)
+
+        shell = client.invoke_shell()
+        time.sleep(1)
+        if shell.recv_ready():
+            shell.recv(65535)
+
+        shell.send("terminal length 0\n")
+        time.sleep(0.5)
+        if shell.recv_ready():
+            shell.recv(65535)
+
+        shell.send("show interfaces transceiver detail\n")
+        time.sleep(3)
+
+        output = b""
+        end_time = time.time() + 10
+        while time.time() < end_time:
+            if shell.recv_ready():
+                output += shell.recv(65535)
+                if output.endswith(b"#" ) or output.endswith(b"> "):
+                    break
+            else:
+                time.sleep(0.3)
+
+        shell.close()
+        client.close()
+
+        text = output.decode("utf-8", errors="ignore")
+
+    except paramiko.AuthenticationException:
+        return UNKNOWN, "SSH authentication failed"
+    except Exception as e:
+        return UNKNOWN, "SSH error: %s" % str(e)
+
+    # Parse section-by-section to only get Temperature (Celsius), not Voltage/power
+    transceivers = []
+    lines = text.split("\n")
+    in_temp_section = False
+    found_header = False
+
+    for line in lines:
+        stripped = line.strip().replace("\r", "")
+        if "Temperature" in stripped:
+            found_header = True
+            continue
+        if found_header and "Celsius" in stripped:
+            in_temp_section = True
+            found_header = False
+            continue
+        if in_temp_section and "---" in stripped:
+            continue
+        if in_temp_section and stripped.startswith("Gi"):
+            parts = stripped.split()
+            if len(parts) >= 2:
                 try:
-                    status = int(value)
-                    if status in (1, 2, 3):
-                        sensors.append(("Entity Sensor %s" % idx, status))
-                except (ValueError, TypeError):
-                    continue
+                    port = parts[0]
+                    temp_c = float(parts[1])
+                    alarm_high = float(parts[2]) if len(parts) > 2 else 85.0
+                    warn_high = float(parts[3]) if len(parts) > 3 else 80.0
+                    transceivers.append((port, temp_c, alarm_high, warn_high))
+                except (ValueError, IndexError):
+                    pass
+        elif in_temp_section and stripped and not stripped.startswith("Gi"):
+            in_temp_section = False
+            found_header = False
 
-    if not sensors:
-        return UNKNOWN, "Cannot determine temperature status from any OID"
+    if not transceivers:
+        return UNKNOWN, "Cannot parse transceiver temperature from CLI output"
 
-    STATUS_MAP = {
-        1: (OK, "Normal"),
-        2: (WARNING, "Warning"),
-        3: (CRITICAL, "Critical"),
-    }
-
+    # Build Nagios perfdata with thresholds from device
     overall_status = OK
     parts = []
     perfdata_parts = []
 
-    for name, status in sensors:
-        exit_code, label = STATUS_MAP.get(status, (UNKNOWN, "Unknown(%s)" % status))
-        parts.append("%s: %s" % (name, label))
-        perfdata_parts.append("%s=%d;1;3" % (name.lower().replace(" ", "_"), status))
-        if exit_code > overall_status:
-            overall_status = exit_code
+    for port, temp_c, alarm_high, warn_high in transceivers:
+        port_status = OK
+
+        if temp_c >= alarm_high:
+            port_status = CRITICAL
+        elif temp_c >= warn_high:
+            port_status = WARNING
+
+        parts.append("%s: %.1fC" % (port, temp_c))
+        perfdata_parts.append("%s=%.1f;%s;%s" % (port.replace("/", "_"), temp_c, warn_high, alarm_high))
+
+        if port_status > overall_status:
+            overall_status = port_status
 
     message = ", ".join(parts)
-    perfdata = " | " + " ".join(perfdata_parts)
+    if perfdata_parts:
+        message += " | " + " ".join(perfdata_parts)
 
     STATUS_LABELS = {0: "OK", 1: "WARNING", 2: "CRITICAL", 3: "UNKNOWN"}
-    return overall_status, "%s - %s%s" % (STATUS_LABELS[overall_status], message, perfdata)
+    return overall_status, "Transceiver temp: %s" % message
 
 
 def check_fan(host, community, version, timeout):

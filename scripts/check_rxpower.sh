@@ -88,18 +88,24 @@ if [ -z "$HOST" ] || [ -z "$PORT" ]; then
     exit $UNKNOWN
 fi
 
+SSH_ERR=$(mktemp)
 OUTPUT=$(sshpass -p "$SSH_PASS" ssh \
     -o StrictHostKeyChecking=no \
     -o ConnectTimeout=10 \
     -o UserKnownHostsFile=/dev/null \
+    -o KexAlgorithms=+diffie-hellman-group1-sha1,diffie-hellman-group14-sha1 \
     -p "$SSH_PORT" \
     "$SSH_USER@$HOST" \
-    "show interfaces $PORT transceiver detail" 2>/dev/null)
+    "show interfaces $PORT transceiver detail" 2>"$SSH_ERR")
+SSH_RC=$?
 
-if [ $? -ne 0 ] || [ -z "$OUTPUT" ]; then
-    echo "CRITICAL - SSH connection failed to $HOST"
+if [ $SSH_RC -ne 0 ] || [ -z "$OUTPUT" ]; then
+    SSH_MSG=$(cat "$SSH_ERR" 2>/dev/null | head -5)
+    rm -f "$SSH_ERR"
+    echo "CRITICAL - SSH connection failed to $HOST (rc=$SSH_RC: $SSH_MSG)"
     exit $CRITICAL
 fi
+rm -f "$SSH_ERR"
 
 # Parse the Receive Power section:
 # Section header contains "Receive Power"

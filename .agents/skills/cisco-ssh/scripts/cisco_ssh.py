@@ -37,13 +37,13 @@ def enable_legacy_kex():
     """Enable legacy SSH key exchange algorithms for old Cisco IOS."""
     try:
         import paramiko
-        # Old Cisco IOS (12.x, early 15.x) uses weak algorithms
-        paramiko.Transport._preferred_kex = (
-            "diffie-hellman-group14-sha1",
-            "diffie-hellman-group-exchange-sha1",
-            "diffie-hellman-group1-sha1",
-            "ecdh-sha2-nistp256",
-        )
+        available = set(paramiko.Transport._preferred_kex)
+        legacy = {"diffie-hellman-group14-sha1", "diffie-hellman-group-exchange-sha1",
+                  "diffie-hellman-group1-sha1", "ecdh-sha2-nistp256",
+                  "diffie-hellman-group14-sha256", "diffie-hellman-group-exchange-sha256",
+                  "diffie-hellman-group16-sha512"}
+        merged = list(dict.fromkeys([k for k in (list(legacy & available) + list(available))]))
+        paramiko.Transport._preferred_kex = tuple(merged)
     except (ImportError, AttributeError):
         pass
 

@@ -1,38 +1,29 @@
 #!/usr/bin/env python3
 """
-Cisco transceiver SNMP check for Nagios.
+Cisco transceiver check for Nagios via SSH.
 
-Monitors SFP transceiver metrics: temperature, voltage, TX power, RX power.
-Uses CISCO-ENTITY-SENSOR-MIB to query diagnostic data.
+Monitors SFP transceiver metrics by parsing CLI output:
+  show interfaces <iface> transceiver detail
+
+Metrics: temperature, voltage, TX power, RX power (with device thresholds).
 
 Usage:
-    check_snmp_cisco_transceiver.py --host HOST --interface INTERFACE [--warn THRESH] [--crit THRESH]
+    check_snmp_cisco_transceiver.py --host HOST --interface INTERFACE \\
+        --ssh-user USER --ssh-pass PASS [--warn-temp ...] [--crit-temp ...]
 
-Exit codes:
-    0 = OK
-    1 = WARNING
-    2 = CRITICAL
-    3 = UNKNOWN
+Exit codes: 0=OK, 1=WARNING, 2=CRITICAL, 3=UNKNOWN
 """
 
 import argparse
-import asyncio
 import os
+import re
 import sys
+import time
 
 try:
-    from pysnmp.hlapi.v3arch.asyncio import (
-        SnmpEngine,
-        CommunityData,
-        UdpTransportTarget,
-        ContextData,
-        ObjectType,
-        ObjectIdentity,
-        get_cmd,
-        next_cmd,
-    )
-except ImportError as e:
-    print("UNKNOWN - pysnmp import failed: %s" % e)
+    import paramiko
+except ImportError:
+    print("UNKNOWN - paramiko not installed. pip install paramiko")
     sys.exit(3)
 
 
@@ -41,121 +32,6 @@ WARNING = 1
 CRITICAL = 2
 UNKNOWN = 3
 
-# ENTITY-MIB OIDs
-ENT_PHYSICAL_CLASS = "1.3.6.1.2.1.47.1.1.1.1.5"
-ENT_PHYSICAL_NAME = "1.3.6.1.2.1.47.1.1.1.1.7"
-
-# CISCO-ENTITY-SENSOR-MIB OIDs
-ENT_SENSOR_TYPE = "1.3.6.1.4.1.9.9.91.1.1.1.1.1"
-ENT_SENSOR_SCALE = "1.3.6.1.4.1.9.9.91.1.1.1.1.2"
-ENT_SENSOR_VALUE = "1.3.6.1.4.1.9.9.91.1.1.1.1.4"
-ENT_SENSOR_STATUS = "1.3.6.1.4.1.9.9.91.1.1.1.1.5"
-ENT_SENSOR_THRESH_TABLE = "1.3.6.1.4.1.9.9.91.1.2.1.1"
-
-# Sensor types (CISCO-ENTITY-SENSOR-MIB::EntSensorType)
-SENSOR_TYPES = {
-    1: "voltage",
-    3: "current",
-    6: "temperature",
-    8: "dBm",
-}
-
-# Sensor status
-SENSOR_STATUS = {
-    1: "ok",
-    2: "unavailable",
-    3: "nonoperational",
-}
-
-# Sensor scales (CISCO-ENTITY-SENSOR-MIB::EntSensorScale)
-SENSOR_SCALES = {
-    1: -24,  # yocto
-    2: -21,  # zepto
-    3: -18,  # atto
-    4: -15,  # femto
-    5: -12,  # pico
-    6: -9,   # nano
-    7: -6,   # micro
-    8: -3,   # milli
-    9: 0,    # units (base)
-    10: 3,   # kilo
-    11: 6,   # mega
-    12: 9,   # giga
-    13: 12,  # tera
-    14: 15,  # peta
-    15: 18,  # exa
-    16: 21,  # zetta
-    17: 24,  # yotta
-}
-
-
-async def snmp_get(host, oid, community, version, timeout):
-    try:
-        error_indication, error_status, error_index, var_binds = await get_cmd(
-            SnmpEngine(),
-            CommunityData(community),
-            await UdpTransportTarget.create((host, 161), timeout=timeout, retries=2),
-            ContextData(),
-            ObjectType(ObjectIdentity(oid)),
-        )
-        if error_indication:
-            return CRITICAL, "SNMP error: %s" % error_indication
-        if error_status:
-            return CRITICAL, "SNMP error: %s" % error_status.prettyPrint()
-        if var_binds:
-            return OK, var_binds[0][1].prettyPrint()
-        return UNKNOWN, "No value returned"
-    except Exception as e:
-        return UNKNOWN, "Exception: %s" % str(e)
-
-
-async def snmp_walk(host, oid, community, version, timeout):
-    results = []
-    try:
-        current_oid = oid
-        max_iterations = 200
-
-        for _ in range(max_iterations):
-            error_indication, error_status, error_index, var_binds = await next_cmd(
-                SnmpEngine(),
-                CommunityData(community),
-                await UdpTransportTarget.create((host, 161), timeout=timeout, retries=2),
-                ContextData(),
-                ObjectType(ObjectIdentity(current_oid)),
-                lexicographicMode=True,
-            )
-
-            if error_indication:
-                return CRITICAL, "SNMP error: %s" % error_indication, []
-            if error_status:
-                if error_status.prettyPrint() == "noSuchName":
-                    break
-                return CRITICAL, "SNMP error: %s" % error_status.prettyPrint(), []
-            if not var_binds:
-                break
-
-            reached_end = False
-            for var_bind in var_binds:
-                oid_full, value = var_bind
-                oid_str = str(oid_full)
-                if not oid_str.startswith(oid):
-                    reached_end = True
-                    break
-                idx_str = oid_str.rsplit(".", 1)[-1]
-                try:
-                    idx = int(idx_str)
-                except ValueError:
-                    idx = idx_str
-                results.append((idx, value.prettyPrint()))
-                current_oid = oid_str
-
-            if reached_end:
-                break
-
-        return OK, "", results
-    except Exception as e:
-        return UNKNOWN, "Exception: %s" % str(e), []
-
 
 def none_or_float(val):
     if val is None or isinstance(val, str) and val.lower() in ("none", ""):
@@ -163,178 +39,228 @@ def none_or_float(val):
     return float(val)
 
 
-async def check_transceiver(host, interface, community, version, timeout, warn_temp, crit_temp,
-                            warn_volt, crit_volt, warn_tx, crit_tx, warn_rx, crit_rx):
-    # Step 1: Walk entPhysicalName to find entity index for the target interface
-    code, msg, phys_names = await snmp_walk(host, ENT_PHYSICAL_NAME, community, version, timeout)
-    if code != OK:
-        return UNKNOWN, "Cannot walk entPhysicalName: %s" % msg
+def ssh_exec(host, port, user, password, command, timeout=15):
+    """Run a command on a remote Cisco device via paramiko."""
+    try:
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
-    # Find entity indices matching the interface name
-    target_entities = set()
-    for idx, name in phys_names:
-        if interface.lower() in name.lower():
-            target_entities.add(idx)
+        transport = paramiko.Transport((host, port))
+        transport.connect(username=user, password=password)
+        client._transport = transport
 
-    if not target_entities:
-        available = [name for _, name in phys_names[:20]]
-        return UNKNOWN, "Interface '%s' not found in entity table (found: %s)" % (interface, ", ".join(available))
+        shell = client.invoke_shell()
+        time.sleep(1)
+        if shell.recv_ready():
+            shell.recv(65535)
 
-    # Step 2: Walk entPhysicalClass to understand entity hierarchy
-    code, msg, phys_classes = await snmp_walk(host, ENT_PHYSICAL_CLASS, community, version, timeout)
-    # entityPhysicalClass: 3=chassis, 5=container, 9=module, 10=port, 11=stack
+        shell.send("terminal length 0\n")
+        time.sleep(1)
+        if shell.recv_ready():
+            shell.recv(65535)
 
-    # Build entity -> class mapping
-    entity_class = {idx: int(cls_val) for idx, cls_val in phys_classes if cls_val.isdigit()}
+        shell.send(command + "\n")
+        time.sleep(3)
 
-    # Find the port entity index (class=10 for port)
-    port_entity = None
-    for idx in target_entities:
-        if entity_class.get(idx) == 10:
-            port_entity = idx
-            break
+        output = b""
+        end_time = time.time() + timeout
+        while time.time() < end_time:
+            if shell.recv_ready():
+                output += shell.recv(65535)
+            elif output:
+                tail = output[-100:]
+                if (b"# " in tail or b"#\r" in tail or
+                    b"> " in tail or b">\r" in tail or
+                    tail.endswith(b">") or tail.endswith(b"#")):
+                    break
+            time.sleep(0.3)
 
-    if port_entity is None:
-        port_entity = min(target_entities)
+        shell.close()
+        client.close()
+        return 0, output.decode("utf-8", errors="ignore").strip(), ""
 
-    # Step 3: Walk entSensorType to find all sensors
-    code, msg, sensor_types = await snmp_walk(host, ENT_SENSOR_TYPE, community, version, timeout)
-    if code != OK:
-        return UNKNOWN, "Cannot walk entSensorType: %s" % msg
+    except paramiko.AuthenticationException:
+        return -1, "", "Authentication failed"
+    except Exception as e:
+        return -1, "", "%s: %s" % (type(e).__name__, str(e))
 
-    # Step 4: Walk entSensorValue
-    code, msg, sensor_values = await snmp_walk(host, ENT_SENSOR_VALUE, community, version, timeout)
-    if code != OK:
-        return UNKNOWN, "Cannot walk entSensorValue: %s" % msg
 
-    # Step 5: Walk entSensorScale
-    code, msg, sensor_scales = await snmp_walk(host, ENT_SENSOR_SCALE, community, version, timeout)
-    # Build scale map
-    scale_map = {}
-    if code == OK:
-        for idx, val in sensor_scales:
-            try:
-                scale_map[idx] = int(val)
-            except ValueError:
-                pass
+def parse_transceiver_output(output, interface):
+    """Parse 'show interfaces <iface> transceiver detail' output.
 
-    # Step 6: Walk entSensorStatus
-    code, msg, sensor_statuses = await snmp_walk(host, ENT_SENSOR_STATUS, community, version, timeout)
-    status_map = {}
-    if code == OK:
-        for idx, val in sensor_statuses:
-            try:
-                status_map[idx] = int(val)
-            except ValueError:
-                pass
+    Returns dict: {metric_name: {value, high_alarm, high_warn, low_warn, low_alarm}}
+    """
+    results = {}
+    lines = output.splitlines()
 
-    # Build sensor type map
-    type_map = {}
-    for idx, val in sensor_types:
-        try:
-            type_map[idx] = int(val)
-        except ValueError:
-            pass
+    metric_pattern = re.compile(
+        r"^\s*(\S+)\s+"
+        r"([\-\d.]+)\s+"
+        r"([\-\d.]+)\s+"
+        r"([\-\d.]+)\s+"
+        r"([\-\d.]+)\s+"
+        r"([\-\d.]+)\s*$"
+    )
 
-    # Build value map
-    value_map = {}
-    for idx, val in sensor_values:
-        try:
-            value_map[idx] = float(val)
-        except ValueError:
-            pass
+    current_metric = None
+    for line in lines:
+        line_lower = line.lower().strip()
 
-    # Find sensors near the port entity (within +/- 10 indices)
-    # On Cisco, sensors for a port are typically at nearby entity indices
-    SENSORS_FOUND = {}
-
-    for sensor_idx in type_map:
-        sensor_type = type_map[sensor_idx]
-        if sensor_type not in SENSOR_TYPES:
+        # Detect metric from keyword on its own line
+        if "temperature" in line_lower and "celsius" not in line_lower:
+            current_metric = "temperature"
             continue
-        if sensor_idx not in value_map:
+        elif "voltage" in line_lower and "volts" not in line_lower:
+            current_metric = "voltage"
+            continue
+        elif "transmit power" in line_lower:
+            current_metric = "tx_power"
+            continue
+        elif "receive power" in line_lower:
+            current_metric = "rx_power"
             continue
 
-        # Check if this sensor is near our port entity
-        # On Cisco, transceiver sensors are typically at indices close to the port
-        if abs(sensor_idx - port_entity) > 20:
-            # Also check if any of the target entities are close
-            near = any(abs(sensor_idx - e) <= 20 for e in target_entities)
-            if not near:
+        if current_metric is None:
+            continue
+
+        m = metric_pattern.match(line)
+        if m:
+            port = m.group(1)
+            # Skip separator lines (all dashes)
+            if port.startswith("-") or not any(c.isdigit() for c in m.group(2)):
                 continue
+            iface_short = re.sub(r"[^A-Za-z0-9/]", "", interface)
+            # Match: Gi0/45 matches GigabitEthernet0/45
+            # Build short form from interface: GigabitEthernet0/45 -> Gi0/45
+            m2 = re.match(r"^(GigabitEthernet|FastEthernet|TenGigabit|Serial|Ethernet)(\d+/\d+)$", interface, re.IGNORECASE)
+            iface_short2 = ""
+            if m2:
+                prefix_map = {"gigabitethernet": "Gi", "fastethernet": "Fa", "tengigabitethernet": "Te", "serial": "Se", "ethernet": "Et"}
+                iface_short2 = prefix_map.get(m2.group(1).lower(), m2.group(1)[:2]) + m2.group(2)
+            if (port == iface_short or port == iface_short2 or
+                    port in interface or interface.startswith(port)):
+                try:
+                    results[current_metric] = {
+                        "value": float(m.group(2)),
+                        "high_alarm": float(m.group(3)),
+                        "high_warn": float(m.group(4)),
+                        "low_warn": float(m.group(5)),
+                        "low_alarm": float(m.group(6)),
+                    }
+                except ValueError:
+                    pass
+                current_metric = None
 
-        type_name = SENSOR_TYPES[sensor_type]
-        value = value_map[sensor_idx]
+    return results
 
-        # Apply scale
-        scale_exp = SENSOR_SCALES.get(scale_map.get(sensor_idx, 9), 0)
-        real_value = value * (10 ** scale_exp)
 
-        # Skip if sensor status is not OK
-        if status_map.get(sensor_idx) == 3:
-            continue
+def check_transceiver(host, user, password, interface, ssh_port, timeout,
+                      warn_temp, crit_temp, warn_volt, crit_volt,
+                      warn_tx, crit_tx, warn_rx, crit_rx):
+    rc, stdout, stderr = ssh_exec(
+        host, ssh_port, user, password,
+        "show interfaces %s transceiver detail" % interface,
+        timeout=timeout,
+    )
 
-        if type_name not in SENSORS_FOUND:
-            SENSORS_FOUND[type_name] = real_value
+    if rc == -1:
+        return UNKNOWN, "SSH error: %s" % stderr
+    if not stdout:
+        return UNKNOWN, "No output from switch"
 
-    if not SENSORS_FOUND:
-        return UNKNOWN, "No transceiver sensors found near entity %d for interface %s" % (port_entity, interface)
+    if "Diagnostic Monitoring is not implemented" in stdout:
+        return UNKNOWN, "Transceiver diagnostic monitoring not supported on %s" % interface
 
-    # Evaluate results
+    if "Temperature" not in stdout and "Voltage" not in stdout:
+        return UNKNOWN, "No transceiver data found for %s" % interface
+
+    data = parse_transceiver_output(stdout, interface)
+    if not data:
+        return UNKNOWN, "Cannot parse transceiver data for %s" % interface
+
     overall = OK
     parts = []
     perfdata = []
 
-    # Temperature check
-    if "temperature" in SENSORS_FOUND:
-        temp = SENSORS_FOUND["temperature"]
-        parts.append("Temp: %.1fC" % temp)
-        perfdata.append("temp=%.1f" % temp)
-        if crit_temp is not None and temp >= crit_temp:
+    # Temperature
+    if "temperature" in data:
+        t = data["temperature"]["value"]
+        d = data["temperature"]
+        parts.append("Temp: %.1fC" % t)
+        perfdata.append("temp=%.1f;%.1f;%.1f;%.1f;%.1f" % (t, d["high_warn"], d["high_alarm"], d["low_warn"], d["low_alarm"]))
+        if crit_temp is not None and t >= crit_temp:
             overall = max(overall, CRITICAL)
-        elif warn_temp is not None and temp >= warn_temp:
+        elif warn_temp is not None and t >= warn_temp:
+            overall = max(overall, WARNING)
+        elif t >= d["high_alarm"]:
+            overall = max(overall, CRITICAL)
+        elif t >= d["high_warn"]:
             overall = max(overall, WARNING)
 
-    # Voltage check
-    if "voltage" in SENSORS_FOUND:
-        volt = SENSORS_FOUND["voltage"]
-        parts.append("Volt: %.2fV" % volt)
-        perfdata.append("volt=%.2f" % volt)
-        if crit_volt is not None and (volt >= crit_volt or volt <= -crit_volt):
+    # Voltage
+    if "voltage" in data:
+        v = data["voltage"]["value"]
+        d = data["voltage"]
+        parts.append("Volt: %.2fV" % v)
+        perfdata.append("volt=%.2f;%.2f;%.2f;%.2f;%.2f" % (v, d["high_warn"], d["high_alarm"], d["low_warn"], d["low_alarm"]))
+        if crit_volt is not None and v >= crit_volt:
             overall = max(overall, CRITICAL)
-        elif warn_volt is not None and (volt >= warn_volt or volt <= -warn_volt):
+        elif warn_volt is not None and v >= warn_volt:
+            overall = max(overall, WARNING)
+        elif v >= d["high_alarm"]:
+            overall = max(overall, CRITICAL)
+        elif v >= d["high_warn"]:
             overall = max(overall, WARNING)
 
-    # TX Power check
-    if "dBm" in SENSORS_FOUND:
-        tx = SENSORS_FOUND["dBm"]
+    # TX Power
+    if "tx_power" in data:
+        tx = data["tx_power"]["value"]
+        d = data["tx_power"]
         parts.append("TX: %.1fdBm" % tx)
-        perfdata.append("tx=%.1f" % tx)
+        perfdata.append("tx=%.1f;%.1f;%.1f;%.1f;%.1f" % (tx, d["high_warn"], d["high_alarm"], d["low_warn"], d["low_alarm"]))
         if crit_tx is not None and tx >= crit_tx:
             overall = max(overall, CRITICAL)
         elif warn_tx is not None and tx >= warn_tx:
             overall = max(overall, WARNING)
+        elif tx >= d["high_alarm"]:
+            overall = max(overall, CRITICAL)
+        elif tx >= d["high_warn"]:
+            overall = max(overall, WARNING)
+
+    # RX Power
+    if "rx_power" in data:
+        rx = data["rx_power"]["value"]
+        d = data["rx_power"]
+        parts.append("RX: %.1fdBm" % rx)
+        perfdata.append("rx=%.1f;%.1f;%.1f;%.1f;%.1f" % (rx, d["high_warn"], d["high_alarm"], d["low_warn"], d["low_alarm"]))
+        if crit_rx is not None and rx >= crit_rx:
+            overall = max(overall, CRITICAL)
+        elif warn_rx is not None and rx >= warn_rx:
+            overall = max(overall, WARNING)
+        elif rx >= d["high_alarm"]:
+            overall = max(overall, CRITICAL)
+        elif rx >= d["high_warn"]:
+            overall = max(overall, WARNING)
 
     if not parts:
-        return UNKNOWN, "No readable sensor values for %s" % interface
-
-    message = ", ".join(parts)
-    perf = " | " + " ".join(perfdata)
+        return UNKNOWN, "No readable metrics for %s" % interface
 
     labels = {0: "OK", 1: "WARNING", 2: "CRITICAL", 3: "UNKNOWN"}
-    return overall, "%s %s %s%s" % (labels[overall], interface, message, perf)
+    message = ", ".join(parts)
+    perf = " | " + " ".join(perfdata)
+    return overall, "%s %s%s" % (interface, message, perf)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Cisco transceiver SNMP check for Nagios")
-    parser.add_argument("--host", required=True, help="Target host IP or hostname")
+    parser = argparse.ArgumentParser(description="Cisco transceiver check for Nagios (SSH)")
+    parser.add_argument("--host", required=True, help="Switch IP or hostname")
     parser.add_argument("--interface", required=True, help="Interface name (e.g., GigabitEthernet0/45)")
-    parser.add_argument("--community", default=os.environ.get("NAGIOS_SNMP_COMMUNITY", "public"),
-                        help="SNMP community string")
-    parser.add_argument("--version", default=os.environ.get("NAGIOS_SNMP_VERSION", "2c"),
-                        help="SNMP version (1, 2c)")
-    parser.add_argument("--timeout", type=int, default=int(os.environ.get("NAGIOS_SNMP_TIMEOUT", "30")),
-                        help="Timeout in seconds")
+    parser.add_argument("--ssh-port", type=int, default=22, help="SSH port (default: 22)")
+    parser.add_argument("--ssh-user", default=os.environ.get("NAGIOS_SSH_USER", "admin"),
+                        help="SSH username")
+    parser.add_argument("--ssh-pass", default=os.environ.get("NAGIOS_SSH_PASS", ""),
+                        help="SSH password")
+    parser.add_argument("--timeout", type=int, default=15, help="SSH timeout in seconds")
     parser.add_argument("--warn-temp", type=none_or_float, default=None, help="Temperature warning threshold")
     parser.add_argument("--crit-temp", type=none_or_float, default=None, help="Temperature critical threshold")
     parser.add_argument("--warn-volt", type=none_or_float, default=None, help="Voltage warning threshold")
@@ -346,13 +272,14 @@ def main():
     args = parser.parse_args()
 
     try:
-        exit_code, message = asyncio.run(check_transceiver(
-            args.host, args.interface, args.community, args.version, args.timeout,
-            args.warn_temp, args.crit_temp,
-            args.warn_volt, args.crit_volt,
-            args.warn_tx, args.crit_tx,
-            args.warn_rx, args.crit_rx,
-        ))
+        exit_code, message = check_transceiver(
+            host=args.host, user=args.ssh_user, password=args.ssh_pass,
+            interface=args.interface, ssh_port=args.ssh_port, timeout=args.timeout,
+            warn_temp=args.warn_temp, crit_temp=args.crit_temp,
+            warn_volt=args.warn_volt, crit_volt=args.crit_volt,
+            warn_tx=args.warn_tx, crit_tx=args.crit_tx,
+            warn_rx=args.warn_rx, crit_rx=args.crit_rx,
+        )
         labels = {0: "OK", 1: "WARNING", 2: "CRITICAL", 3: "UNKNOWN"}
         print("%s - %s" % (labels[exit_code], message))
         sys.exit(exit_code)

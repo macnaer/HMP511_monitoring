@@ -41,7 +41,7 @@ pipeline {
             agent { label 'remote-docker' }
             steps {
                 echo "🌐 Deploying Nagios container on remote server ..."
-                withCredentials([file(credentialsId: 'DEMO Nagios env', variable: 'ENV_FILE')]) {
+                withCredentials([file(credentialsId: 'DEMO_NAGIOS_ENV', variable: 'ENV_FILE')]) {
                     sh '''
                         echo "🧹 Cleaning up old Nagios container and image..."
                         docker stop nagios_nmp11 || true

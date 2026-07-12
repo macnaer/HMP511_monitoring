@@ -41,18 +41,29 @@ pipeline {
             agent { label 'remote-docker' }
             steps {
                 echo "🌐 Deploying Nagios container on remote server ..."
-                sh '''
-                    echo "🧹 Cleaning up old Nagios container and image..."
-                    docker stop nagios_nmp11 || true
-                    docker rm nagios_nmp11 || true
-                    docker rmi ${IMAGE_NAME} || true
+                withCredentials([file(credentialsId: 'DEMO Nagios env', variable: 'ENV_FILE')]) {
+                    sh '''
+                        echo "🧹 Cleaning up old Nagios container and image..."
+                        docker stop nagios_nmp11 || true
+                        docker rm nagios_nmp11 || true
+                        docker rmi ${IMAGE_NAME} || true
 
-                    echo "⬇️ Pulling latest Nagios image..."
-                    docker pull ${IMAGE_NAME}
+                        echo "📄 Placing .env on the host (chmod 600)..."
+                        mkdir -p /opt/nagios
+                        cp "$ENV_FILE" /opt/nagios/.env
+                        chmod 600 /opt/nagios/.env
 
-                    echo "🚀 Starting new Nagios container..."
-                    docker run -d --name nagios_nmp11   --restart=always -p 0.0.0.0:81:80 -v /opt/monitoring_data_demo:/opt/nagios/data:ro ${IMAGE_NAME}
-                '''
+                        echo "⬇️ Pulling latest Nagios image..."
+                        docker pull ${IMAGE_NAME}
+
+                        echo "🚀 Starting new Nagios container..."
+                        docker run -d --name nagios_nmp11   --restart=always \
+                            -p 0.0.0.0:81:80 \
+                            -v /opt/monitoring_data_demo:/opt/nagios/data:ro \
+                            -v /opt/nagios/.env:/.env:ro \
+                            ${IMAGE_NAME}
+                    '''
+                }
             }
         }
     }

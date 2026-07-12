@@ -11,7 +11,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip3 install --no-cache-dir --break-system-packages \
     "pyasn1>=0.5.0" \
     "pysnmp>=5.0.0" \
-    psutil>=5.9.0
+    "psutil>=5.9.0" \
+    "paramiko>=2.12.0"
 
 # Set default SNMP community
 ENV NAGIOS_SNMP_COMMUNITY=LibreNms

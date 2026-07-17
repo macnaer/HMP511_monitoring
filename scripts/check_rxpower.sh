@@ -88,27 +88,6 @@ if [ -z "$HOST" ] || [ -z "$PORT" ]; then
     exit $UNKNOWN
 fi
 
-SSH_ERR=$(mktemp)
-
-sshpass -p "$SSH_PASS" ssh \
-    -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null \
-    -o KexAlgorithms=+diffie-hellman-group1-sha1,diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha1 \
-    -o HostKeyAlgorithms=+ssh-rsa \
-    -o Ciphers=+aes128-cbc,aes192-cbc,aes256-cbc \
-    "$SSH_USER@$HOST" \
-    "terminal length 0; show interfaces $PORT transceiver detail" > "$SSH_ERR" 2>&1
-SSH_RC=$?
-OUTPUT=$(cat "$SSH_ERR")
-
-if [ $SSH_RC -ne 0 ] || [ -z "$OUTPUT" ]; then
-    SSH_MSG=$(cat "$SSH_ERR" 2>/dev/null | tail -10)
-    rm -f "$SSH_ERR"
-    echo "CRITICAL - SSH failed to $HOST (rc=$SSH_RC: $SSH_MSG)"
-    exit $CRITICAL
-fi
-rm -f "$SSH_ERR"
-
 # Expand Cisco shorthand interface names (Gi → GigabitEthernet, etc.)
 case "$PORT" in
     Gi*)   FULL_PORT="GigabitEthernet${PORT#Gi}" ;;
@@ -123,18 +102,50 @@ case "$PORT" in
     *)     FULL_PORT="$PORT" ;;
 esac
 
-# Parse the Receive Power section:
-# Section header contains "Receive Power"
-# Data line starts with the port name
-# Columns: Port, Value, HighAlarm, HighWarn, LowWarn, LowAlarm
+SSH_ERR=$(mktemp)
+
+sshpass -p "$SSH_PASS" ssh \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o KexAlgorithms=+diffie-hellman-group1-sha1,diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha1 \
+    -o HostKeyAlgorithms=+ssh-rsa \
+    -o Ciphers=+aes128-cbc,aes192-cbc,aes256-cbc \
+    "$SSH_USER@$HOST" \
+    "$(printf 'terminal length 0\nshow interfaces %s transceiver detail' "$FULL_PORT")" > "$SSH_ERR" 2>&1
+SSH_RC=$?
+OUTPUT=$(cat "$SSH_ERR")
+
+if [ $SSH_RC -ne 0 ] || [ -z "$OUTPUT" ]; then
+    SSH_MSG=$(cat "$SSH_ERR" 2>/dev/null | tail -10)
+    rm -f "$SSH_ERR"
+    echo "CRITICAL - SSH failed to $HOST (rc=$SSH_RC: $SSH_MSG)"
+    exit $CRITICAL
+fi
+rm -f "$SSH_ERR"
+
+# Parse Receive Power from transceiver detail output.
+# Supports tabular format (all values on same line as "Receive Power"):
+#   Receive Power (dBm):  -2.5  0.0  -1.0  -15.0  -17.0
 RX_LINE=$(echo "$OUTPUT" | awk '
-    /Receive Power/ { in_rx=1; next }
-    in_rx && /^'"$FULL_PORT"'[[:space:]]/ { print; exit }
-    in_rx && /^[[:space:]]*$/ && NR > 0 { in_rx=0 }
+    /[Rr]eceive [Pp]ower/ {
+        vals = ""
+        for (i = 1; i <= NF; i++) {
+            if ($i ~ /^-?[0-9]+(\.[0-9]+)?$/) {
+                vals = vals ? vals " " $i : $i
+            }
+        }
+        if (vals) {
+            print NR, vals
+            exit
+        }
+    }
 ')
 
 if [ -z "$RX_LINE" ]; then
     echo "UNKNOWN - Could not parse Receive Power data for $PORT on $HOST"
+    echo "---BEGIN RAW OUTPUT---"
+    echo "$OUTPUT" | tail -40
+    echo "---END RAW OUTPUT---"
     exit $UNKNOWN
 fi
 

@@ -80,6 +80,7 @@ def run_ssh_command_via_sshpass(host, port, username, password, interface, timeo
         "-o", "ConnectTimeout=10",
         "-o", "KexAlgorithms=+diffie-hellman-group1-sha1,diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha1",
         "-o", "HostKeyAlgorithms=+ssh-rsa",
+        "-o", "Ciphers=+aes128-cbc,aes192-cbc,aes256-cbc",
         "-p", str(port),
         f"{username}@{host}",
         cmd,
@@ -108,13 +109,18 @@ def run_ssh_command_via_paramiko(host, port, username, password, interface, time
 
     try:
         import paramiko
-        available = set(paramiko.Transport._preferred_kex)
-        legacy = {"diffie-hellman-group14-sha1", "diffie-hellman-group-exchange-sha1",
-                  "diffie-hellman-group1-sha1", "ecdh-sha2-nistp256",
-                  "diffie-hellman-group14-sha256", "diffie-hellman-group-exchange-sha256",
-                  "diffie-hellman-group16-sha512"}
-        merged = list(dict.fromkeys([k for k in (list(legacy & available) + list(available))]))
-        paramiko.Transport._preferred_kex = tuple(merged)
+        available_kex = set(paramiko.Transport._preferred_kex)
+        legacy_kex = {"diffie-hellman-group14-sha1", "diffie-hellman-group-exchange-sha1",
+                      "diffie-hellman-group1-sha1", "ecdh-sha2-nistp256",
+                      "diffie-hellman-group14-sha256", "diffie-hellman-group-exchange-sha256",
+                      "diffie-hellman-group16-sha512"}
+        merged_kex = list(dict.fromkeys([k for k in (list(legacy_kex & available_kex) + list(available_kex))]))
+        paramiko.Transport._preferred_kex = tuple(merged_kex)
+
+        available_ciphers = set(paramiko.Transport._preferred_ciphers)
+        legacy_ciphers = {"aes128-cbc", "aes192-cbc", "aes256-cbc", "3des-cbc"}
+        merged_ciphers = list(dict.fromkeys([k for k in (list(legacy_ciphers & available_ciphers) + list(available_ciphers))]))
+        paramiko.Transport._preferred_ciphers = tuple(merged_ciphers)
     except (ImportError, AttributeError):
         pass
 

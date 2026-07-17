@@ -103,19 +103,18 @@ case "$PORT" in
 esac
 
 SSH_ERR=$(mktemp)
-SSH_CMDS=$(mktemp)
-printf 'terminal length 0\nshow interfaces %s transceiver detail\n' "$FULL_PORT" > "$SSH_CMDS"
 
-sshpass -p "$SSH_PASS" ssh -tt \
+sshpass -p "$SSH_PASS" ssh \
     -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
+    -o ConnectTimeout=10 \
     -o KexAlgorithms=+diffie-hellman-group1-sha1,diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha1 \
     -o HostKeyAlgorithms=+ssh-rsa \
     -o Ciphers=+aes128-cbc,aes192-cbc,aes256-cbc \
-    "$SSH_USER@$HOST" < "$SSH_CMDS" > "$SSH_ERR" 2>&1
+    "$SSH_USER@$HOST" \
+    "terminal length 0; show interfaces $FULL_PORT transceiver detail" > "$SSH_ERR" 2>&1
 SSH_RC=$?
 OUTPUT=$(cat "$SSH_ERR")
-rm -f "$SSH_CMDS"
 
 if [ $SSH_RC -ne 0 ] || [ -z "$OUTPUT" ]; then
     SSH_MSG=$(cat "$SSH_ERR" 2>/dev/null | tail -10)

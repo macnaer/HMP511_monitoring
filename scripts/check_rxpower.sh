@@ -93,6 +93,7 @@ SSH_ERR=$(mktemp)
 sshpass -p "$SSH_PASS" ssh \
     -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
+    -o KexAlgorithms=+diffie-hellman-group1-sha1,diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha1 \
     "$SSH_USER@$HOST" \
     "terminal length 0; show interfaces $PORT transceiver detail" > "$SSH_ERR" 2>&1
 SSH_RC=$?

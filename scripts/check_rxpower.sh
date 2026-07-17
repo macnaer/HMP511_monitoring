@@ -109,13 +109,27 @@ if [ $SSH_RC -ne 0 ] || [ -z "$OUTPUT" ]; then
 fi
 rm -f "$SSH_ERR"
 
+# Expand Cisco shorthand interface names (Gi → GigabitEthernet, etc.)
+case "$PORT" in
+    Gi*)   FULL_PORT="GigabitEthernet${PORT#Gi}" ;;
+    Fa*)   FULL_PORT="FastEthernet${PORT#Fa}" ;;
+    Te*)   FULL_PORT="TenGigabitEthernet${PORT#Te}" ;;
+    Tw*)   FULL_PORT="TwoGigabitEthernet${PORT#Tw}" ;;
+    Fo*)   FULL_PORT="FortyGigabitEthernet${PORT#Fo}" ;;
+    Hu*)   FULL_PORT="HundredGigabitEthernet${PORT#Hu}" ;;
+    Po*)   FULL_PORT="Port-channel${PORT#Po}" ;;
+    Vl*)   FULL_PORT="Vlan${PORT#Vl}" ;;
+    Lo*)   FULL_PORT="Loopback${PORT#Lo}" ;;
+    *)     FULL_PORT="$PORT" ;;
+esac
+
 # Parse the Receive Power section:
 # Section header contains "Receive Power"
 # Data line starts with the port name
 # Columns: Port, Value, HighAlarm, HighWarn, LowWarn, LowAlarm
 RX_LINE=$(echo "$OUTPUT" | awk '
     /Receive Power/ { in_rx=1; next }
-    in_rx && /^'"$PORT"'[[:space:]]/ { print; exit }
+    in_rx && /^'"$FULL_PORT"'[[:space:]]/ { print; exit }
     in_rx && /^[[:space:]]*$/ && NR > 0 { in_rx=0 }
 ')
 

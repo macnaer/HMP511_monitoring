@@ -79,6 +79,7 @@ def run_ssh_command_via_sshpass(host, port, username, password, interface, timeo
         "-o", "UserKnownHostsFile=/dev/null",
         "-o", "ConnectTimeout=10",
         "-o", "KexAlgorithms=+diffie-hellman-group1-sha1,diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha1",
+        "-o", "HostKeyAlgorithms=+ssh-rsa",
         "-p", str(port),
         f"{username}@{host}",
         cmd,

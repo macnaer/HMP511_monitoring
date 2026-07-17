@@ -89,17 +89,14 @@ if [ -z "$HOST" ] || [ -z "$PORT" ]; then
 fi
 
 SSH_ERR=$(mktemp)
-SSH_CMDS=$(mktemp)
-printf "terminal length 0\nshow interfaces %s transceiver detail\n" "$PORT" > "$SSH_CMDS"
 
 sshpass -p "$SSH_PASS" ssh \
     -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
-    "$SSH_USER@$HOST" < "$SSH_CMDS" > "$SSH_ERR" 2>&1
+    "$SSH_USER@$HOST" \
+    "terminal length 0; show interfaces $PORT transceiver detail" > "$SSH_ERR" 2>&1
 SSH_RC=$?
 OUTPUT=$(cat "$SSH_ERR")
-
-rm -f "$SSH_CMDS"
 
 if [ $SSH_RC -ne 0 ] || [ -z "$OUTPUT" ]; then
     SSH_MSG=$(cat "$SSH_ERR" 2>/dev/null | tail -10)

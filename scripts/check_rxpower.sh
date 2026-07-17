@@ -103,17 +103,19 @@ case "$PORT" in
 esac
 
 SSH_ERR=$(mktemp)
+SSH_CMDS=$(mktemp)
+printf 'terminal length 0\nshow interfaces %s transceiver detail\n' "$FULL_PORT" > "$SSH_CMDS"
 
-sshpass -p "$SSH_PASS" ssh \
+sshpass -p "$SSH_PASS" ssh -tt \
     -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
     -o KexAlgorithms=+diffie-hellman-group1-sha1,diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha1 \
     -o HostKeyAlgorithms=+ssh-rsa \
     -o Ciphers=+aes128-cbc,aes192-cbc,aes256-cbc \
-    "$SSH_USER@$HOST" \
-    "$(printf 'terminal length 0\nshow interfaces %s transceiver detail' "$FULL_PORT")" > "$SSH_ERR" 2>&1
+    "$SSH_USER@$HOST" < "$SSH_CMDS" > "$SSH_ERR" 2>&1
 SSH_RC=$?
 OUTPUT=$(cat "$SSH_ERR")
+rm -f "$SSH_CMDS"
 
 if [ $SSH_RC -ne 0 ] || [ -z "$OUTPUT" ]; then
     SSH_MSG=$(cat "$SSH_ERR" 2>/dev/null | tail -10)
@@ -124,11 +126,64 @@ fi
 rm -f "$SSH_ERR"
 
 # Parse Receive Power from transceiver detail output.
-# Supports tabular format (all values on same line as "Receive Power"):
-#   Receive Power (dBm):  -2.5  0.0  -1.0  -15.0  -17.0
+# Tries multiple formats:
+#   Format 1 (tabular, same line):       Receive Power (dBm):  -2.5  0.0  -1.0  -15.0  -17.0
+#   Format 2 (inline, same line):        Receive Power: -2.5 dBm (High: 0.0 dBm, Low: -15.0 dBm)
+#   Format 3 (section, next line):       Receive Power:\nGi0/45  -2.5  0.0  -1.0  -15.0  -17.0
+# Columns: current_value, high_alarm, high_warn, low_warn, low_alarm
 RX_LINE=$(echo "$OUTPUT" | awk '
     /[Rr]eceive [Pp]ower/ {
+        line = $0
         vals = ""
+
+        # Try to extract tabular values from this line
+        for (i = 1; i <= NF; i++) {
+            if ($i ~ /^-?[0-9]+(\.[0-9]+)?$/) {
+                vals = vals ? vals " " $i : $i
+            }
+        }
+
+        if (vals) {
+            split(vals, a, " ")
+            # Must have at least current value (5: cur, ha, hw, lw, la)
+            if (length(a) >= 5 || (length(a) == 1 && !($0 ~ /High/ && $0 ~ /Low/))) {
+                print NR, vals
+                exit
+            }
+        }
+
+        # Inline format: "Receive Power: -2.5 dBm (High: 0.0 dBm, Low: -15.0 dBm)"
+        rx_val = ""
+        ha = ""; hw = ""; lw = ""; la = ""
+        # Find value after "Receive Power" and before "dBm"
+        if (line ~ /[Rr]eceive [Pp]ower[^:]*:[[:space:]]*-?[0-9.]+/) {
+            sub(/.*[Rr]eceive [Pp]ower[^:]*:[[:space:]]*/, "", line)
+            rx_val = line
+            sub(/[^0-9.+-].*$/, "", rx_val)
+        }
+        if (line ~ /High:[[:space:]]*-?[0-9.]+/) {
+            sub(/.*High:[[:space:]]*/, "", line)
+            ha = line
+            sub(/[^0-9.+-].*$/, "", ha)
+            hw = ha
+        }
+        if (line ~ /Low:[[:space:]]*-?[0-9.]+/) {
+            sub(/.*Low:[[:space:]]*/, "", line)
+            lw = line
+            sub(/[^0-9.+-].*$/, "", lw)
+            la = lw
+        }
+        if (rx_val ~ /^-?[0-9]/ && ha ~ /^-?[0-9]/) {
+            print NR, rx_val, ha, hw, lw, la
+            exit
+        }
+
+        # Section format: data might be on next line
+        found = NR
+        next
+    }
+    found && NR == found + 1 {
+        # Next line after "Receive Power" header
         for (i = 1; i <= NF; i++) {
             if ($i ~ /^-?[0-9]+(\.[0-9]+)?$/) {
                 vals = vals ? vals " " $i : $i

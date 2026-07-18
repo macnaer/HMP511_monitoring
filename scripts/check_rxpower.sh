@@ -134,15 +134,16 @@ rm -f "$SSH_ERR"
 #   ------- --------- ---------- --------- ---------- ----------
 #   Gi0/45  -7.4      1.0         0.0        -26.0      -27.0
 # Columns: port, value, high_alarm, high_warn, low_warn, low_alarm
-RX_LINE=$(echo "$OUTPUT" | awk '
-    /^Receive Power / { found = NR }
-    found && NR == found + 3 && $1 == "'"$PORT"'" { print; exit }
+RX_LINE=$(printf '%s\n' "$OUTPUT" | awk '
+    /^Receive Power / { hdr = 1 }
+    hdr && /^Port / && /\(dBm\)/ { unit = 1 }
+    hdr && unit && $1 == "'"$PORT"'" && $2 ~ /^-?[0-9]/ { print; exit }
 ')
 
 if [ -z "$RX_LINE" ]; then
     echo "UNKNOWN - Could not parse Receive Power data for $PORT on $HOST"
     echo "---BEGIN RAW OUTPUT---"
-    echo "$OUTPUT" | tail -40
+    printf '%s\n' "$OUTPUT" | tail -40
     echo "---END RAW OUTPUT---"
     exit $UNKNOWN
 fi

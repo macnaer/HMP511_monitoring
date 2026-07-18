@@ -422,11 +422,12 @@ def check_uptime(host, community, version, timeout):
         return OK, "Uptime: %s" % value
 
 
-def check_interface(host, community, version, timeout, interface):
+def check_interface(host, community, version, timeout, interface, warn=None, crit=None):
     """Check interface(s) status.
 
     If interface is specified, check that single port by name.
     If interface is None/empty, check all admin-up interfaces.
+    --warn and --crit are treated as threshold counts of down ports.
     """
     exit_code, descrs = snmp_walk(host, CISCO_OIDS["if_descr"], community, version, timeout)
     if exit_code != OK:
@@ -501,12 +502,25 @@ def check_interface(host, community, version, timeout, interface):
             pass
 
     total_admin_up = len(admin_up_indices)
+    down_count = len(down_ports)
 
-    if not down_ports:
+    if down_count == 0:
         return OK, "All interfaces up (%d ports)" % total_admin_up
+
+    down_list = ", ".join(down_ports)
+
+    if warn is not None and crit is not None:
+        if down_count >= crit:
+            return CRITICAL, "Interface(s) down: %s (%d/%d ports down)" % (down_list, down_count, total_admin_up)
+        elif down_count >= warn:
+            return WARNING, "Interface(s) down: %s (%d/%d ports down)" % (down_list, down_count, total_admin_up)
+        return OK, "%d ports down (below warn threshold)" % down_count
+    elif crit is not None:
+        if down_count >= crit:
+            return CRITICAL, "Interface(s) down: %s (%d/%d ports down)" % (down_list, down_count, total_admin_up)
+        return OK, "%d ports down (below crit threshold)" % down_count
     else:
-        down_list = ", ".join(down_ports)
-        return CRITICAL, "Interface(s) down: %s (%d/%d ports down)" % (down_list, len(down_ports), total_admin_up)
+        return CRITICAL, "Interface(s) down: %s (%d/%d ports down)" % (down_list, down_count, total_admin_up)
 
 
 def main():
@@ -535,7 +549,7 @@ def main():
             "storage": lambda: check_storage(args.host, args.community, args.version, args.timeout, args.warn, args.crit),
             "cpu": lambda: check_cpu(args.host, args.community, args.version, args.timeout, args.warn, args.crit),
             "uptime": lambda: check_uptime(args.host, args.community, args.version, args.timeout),
-            "interface": lambda: check_interface(args.host, args.community, args.version, args.timeout, args.interface),
+            "interface": lambda: check_interface(args.host, args.community, args.version, args.timeout, args.interface, args.warn, args.crit),
         }
 
         exit_code, message = checks[args.check]()

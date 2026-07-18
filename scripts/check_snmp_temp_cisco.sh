@@ -1,6 +1,6 @@
 #!/bin/bash
 # check_snmp_temp_cisco.sh
-# Multi-strategy Cisco temperature check via SNMP
+# Cisco temperature check — SSH (primary) + SNMP multi-strategy (fallback)
 # Виклик: check_snmp_temp_cisco.sh <host> <community> <warn> <crit>
 
 HOST=$1
@@ -9,9 +9,69 @@ WARN=$3
 CRIT=$4
 TIMEOUT=${5:-30}
 
+SSH_USER=${NAGIOS_SSH_USER:-test}
+SSH_PASS=${NAGIOS_SSH_PASS:-Qwerty-1}
+
+OK=0
+WARNING=1
+CRITICAL=2
+UNKNOWN=3
+
 STRATEGIES_USED=""
 TEMP_RESULTS=()
 
+is_numeric() {
+    [[ "$1" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]
+}
+
+# ----------------------------------------------------------------
+# SSH-based temperature check (Cisco IOS CLI)
+# ----------------------------------------------------------------
+ssh_temp_check() {
+    STRATEGIES_USED="${STRATEGIES_USED}ssh-cli "
+
+    SSH_OPTS=(
+        -o StrictHostKeyChecking=no
+        -o UserKnownHostsFile=/dev/null
+        -o ConnectTimeout="$TIMEOUT"
+        -o KexAlgorithms=+diffie-hellman-group1-sha1
+        -o HostKeyAlgorithms=+ssh-rsa
+        -o Ciphers=+aes128-cbc
+        -o LogLevel=ERROR
+    )
+
+    output=$(sshpass -p "$SSH_PASS" ssh \
+        "${SSH_OPTS[@]}" \
+        "$SSH_USER@$HOST" \
+        "show environment temperature" 2>&1)
+    local rc=$?
+
+    if [ $rc -ne 0 ] || [ -z "$output" ]; then
+        return 1
+    fi
+
+    temp=$(echo "$output" | grep -ioE 'temperature is [0-9]+' | grep -oE '[0-9]+' | head -1)
+    if [ -z "$temp" ]; then
+        temp=$(echo "$output" | grep -ioE '[0-9]+ degrees? Celsius' | grep -oE '[0-9]+' | head -1)
+    fi
+    if [ -z "$temp" ]; then
+        temp=$(echo "$output" | grep -ioE 'TEMP:\s*[0-9]+' | grep -oE '[0-9]+' | head -1)
+    fi
+    if [ -z "$temp" ]; then
+        temp=$(echo "$output" | grep -oE '[0-9]+' | head -1)
+    fi
+
+    if is_numeric "$temp"; then
+        TEMP_RESULTS+=("${temp}|System Temp (SSH)")
+        return 0
+    fi
+
+    return 1
+}
+
+# ----------------------------------------------------------------
+# SNMP multi-strategy fallback
+# ----------------------------------------------------------------
 snmp_get() {
     snmpget -v2c -c "$COMMUNITY" -Oqv -t "$TIMEOUT" "$HOST" "$1" 2>/dev/null
 }
@@ -20,13 +80,6 @@ snmp_walk() {
     snmpwalk -v2c -c "$COMMUNITY" -On -t "$TIMEOUT" "$HOST" "$1" 2>/dev/null
 }
 
-is_numeric() {
-    [[ "$1" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]
-}
-
-# ----------------------------------------------------------------
-# Strategy 1: IETF ENTITY-SENSOR-MIB
-# ----------------------------------------------------------------
 strategy_entity_sensor() {
     STRATEGIES_USED="${STRATEGIES_USED}entity-sensor-mib "
     RAW=$(snmp_walk "1.3.6.1.2.1.99.1.1.1")
@@ -71,9 +124,6 @@ strategy_entity_sensor() {
     [ "$FOUND" -eq 1 ]
 }
 
-# ----------------------------------------------------------------
-# Strategy 2: CISCO-PROCESS-MIB CPU Temperature (cpmCPUTemperature)
-# ----------------------------------------------------------------
 strategy_cpu_temp() {
     STRATEGIES_USED="${STRATEGIES_USED}cisco-process-mib "
     RAW=$(snmp_walk "1.3.6.1.4.1.9.9.109.1.1.1.1.7")
@@ -92,9 +142,6 @@ strategy_cpu_temp() {
     [ "$FOUND" -eq 1 ]
 }
 
-# ----------------------------------------------------------------
-# Strategy 3: CISCO-ENVMON-MIB temperature table
-# ----------------------------------------------------------------
 strategy_envmon() {
     STRATEGIES_USED="${STRATEGIES_USED}cisco-envmon-mib "
     VALUES=$(snmp_walk "1.3.6.1.4.1.9.9.13.1.3.1.3")
@@ -130,10 +177,6 @@ strategy_envmon() {
     [ "$FOUND" -eq 1 ]
 }
 
-# ----------------------------------------------------------------
-# Strategy 4: CISCO-ENTITY-SENSOR-MIB (entSensorValue)
-# Cisco private sensor MIB: 1.3.6.1.4.1.9.9.91
-# ----------------------------------------------------------------
 strategy_cisco_entity_sensor() {
     STRATEGIES_USED="${STRATEGIES_USED}cisco-entity-sensor-mib "
     RAW=$(snmp_walk "1.3.6.1.4.1.9.9.91.1.1.1.1")
@@ -175,10 +218,6 @@ strategy_cisco_entity_sensor() {
     [ "$FOUND" -eq 1 ]
 }
 
-# ----------------------------------------------------------------
-# Strategy 5: CISCO-ENVMON-MIB brute-force common indices
-# (some switches report temp at specific scalar indices)
-# ----------------------------------------------------------------
 strategy_envmon_bruteforce() {
     STRATEGIES_USED="${STRATEGIES_USED}envmon-bruteforce "
     FOUND=0
@@ -200,10 +239,6 @@ strategy_envmon_bruteforce() {
     [ "$FOUND" -eq 1 ]
 }
 
-# ----------------------------------------------------------------
-# Strategy 6: OLD-CISCO-ENVMON-MIB scalar status code
-# Returns 1=Normal, 2=Warning, 3=Critical (NOT actual temperature)
-# ----------------------------------------------------------------
 strategy_old_envmon() {
     STRATEGIES_USED="${STRATEGIES_USED}old-cisco-envmon-mib "
     RAW=$(snmp_get "1.3.6.1.4.1.9.5.1.2.11.0")
@@ -220,9 +255,9 @@ strategy_old_envmon() {
 }
 
 # ================================================================
-# MAIN: try strategies in order
+# MAIN: SSH first, then SNMP fallback
 # ================================================================
-strategy_entity_sensor || strategy_cpu_temp || strategy_envmon || strategy_cisco_entity_sensor || strategy_envmon_bruteforce || strategy_old_envmon
+ssh_temp_check || strategy_entity_sensor || strategy_cpu_temp || strategy_envmon || strategy_cisco_entity_sensor || strategy_envmon_bruteforce || strategy_old_envmon
 
 if [ ${#TEMP_RESULTS[@]} -eq 0 ]; then
     echo "CRITICAL - No temperature sensors found (tried: ${STRATEGIES_USED:-none})"

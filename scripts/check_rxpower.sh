@@ -127,74 +127,17 @@ fi
 rm -f "$SSH_ERR"
 
 # Parse Receive Power from transceiver detail output.
-# Tries multiple formats:
-#   Format 1 (tabular, same line):       Receive Power (dBm):  -2.5  0.0  -1.0  -15.0  -17.0
-#   Format 2 (inline, same line):        Receive Power: -2.5 dBm (High: 0.0 dBm, Low: -15.0 dBm)
-#   Format 3 (section, next line):       Receive Power:\nGi0/45  -2.5  0.0  -1.0  -15.0  -17.0
-# Columns: current_value, high_alarm, high_warn, low_warn, low_alarm
+# Cisco IOS format (multi-line section):
+#   Optical           High Alarm  High Warn  Low Warn  Low Alarm
+#   Receive Power     Threshold   Threshold  Threshold  Threshold
+#   Port     (dBm)    (dBm)       (dBm)      (dBm)      (dBm)
+#   ------- --------- ---------- --------- ---------- ----------
+#   Gi0/45  -7.4      1.0         0.0        -26.0      -27.0
+# Columns: port, value, high_alarm, high_warn, low_warn, low_alarm
 RX_LINE=$(echo "$OUTPUT" | awk '
-    /[Rr]eceive [Pp]ower/ {
-        line = $0
-        vals = ""
-
-        # Try to extract tabular values from this line
-        for (i = 1; i <= NF; i++) {
-            if ($i ~ /^-?[0-9]+(\.[0-9]+)?$/) {
-                vals = vals ? vals " " $i : $i
-            }
-        }
-
-        if (vals) {
-            split(vals, a, " ")
-            # Must have at least current value (5: cur, ha, hw, lw, la)
-            if (length(a) >= 5 || (length(a) == 1 && !($0 ~ /High/ && $0 ~ /Low/))) {
-                print NR, vals
-                exit
-            }
-        }
-
-        # Inline format: "Receive Power: -2.5 dBm (High: 0.0 dBm, Low: -15.0 dBm)"
-        rx_val = ""
-        ha = ""; hw = ""; lw = ""; la = ""
-        # Find value after "Receive Power" and before "dBm"
-        if (line ~ /[Rr]eceive [Pp]ower[^:]*:[[:space:]]*-?[0-9.]+/) {
-            sub(/.*[Rr]eceive [Pp]ower[^:]*:[[:space:]]*/, "", line)
-            rx_val = line
-            sub(/[^0-9.+-].*$/, "", rx_val)
-        }
-        if (line ~ /High:[[:space:]]*-?[0-9.]+/) {
-            sub(/.*High:[[:space:]]*/, "", line)
-            ha = line
-            sub(/[^0-9.+-].*$/, "", ha)
-            hw = ha
-        }
-        if (line ~ /Low:[[:space:]]*-?[0-9.]+/) {
-            sub(/.*Low:[[:space:]]*/, "", line)
-            lw = line
-            sub(/[^0-9.+-].*$/, "", lw)
-            la = lw
-        }
-        if (rx_val ~ /^-?[0-9]/ && ha ~ /^-?[0-9]/) {
-            print NR, rx_val, ha, hw, lw, la
-            exit
-        }
-
-        # Section format: data might be on next line
-        found = NR
-        next
-    }
-    found && NR == found + 1 {
-        # Next line after "Receive Power" header
-        for (i = 1; i <= NF; i++) {
-            if ($i ~ /^-?[0-9]+(\.[0-9]+)?$/) {
-                vals = vals ? vals " " $i : $i
-            }
-        }
-        if (vals) {
-            print NR, vals
-            exit
-        }
-    }
+    /Receive Power/ { rx_section = 1 }
+    rx_section && /^-+[[:space:]]*$/ { after_dash = 1; next }
+    rx_section && after_dash && $1 == "'"$PORT"'" { print; exit }
 ')
 
 if [ -z "$RX_LINE" ]; then

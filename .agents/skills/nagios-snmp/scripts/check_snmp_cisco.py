@@ -209,15 +209,13 @@ def check_temperature(host, community, version, timeout, warn, crit):
 
 
 def check_temperature_status(host, community, version, timeout, warn=None, crit=None):
-    """Check system temperature via SSH and show real Celsius values.
+    """Check system temperature via SSH (primary) + SNMP (fallback).
 
-    Connects to the switch via sshpass+SSH, runs 'show environment temperature',
-    parses system temperature, and reports with Nagios thresholds.
-    Uses sshpass + subprocess with legacy Kex/Ciphers/HostKeyAlgs for old Cisco IOS.
+    SSH connects via sshpass with legacy Kex/Ciphers/HostKeyAlgs for old Cisco IOS,
+    tries multiple CLI commands to get system temperature, then falls back to SNMP.
     """
     import subprocess
 
-    # Read SSH credentials from .env
     env = {}
     env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..", ".env")
     if os.path.exists(env_path):
@@ -234,73 +232,112 @@ def check_temperature_status(host, community, version, timeout, warn=None, crit=
     ssh_user = env.get("USRERNAME") or env.get("USERNAME", "")
     ssh_pass = env.get("PASSWORD", "")
 
-    if not ssh_user or not ssh_pass:
-        return UNKNOWN, "SSH credentials not found in .env"
+    if ssh_user and ssh_pass:
+        try:
+            ssh_opts = [
+                "sshpass", "-p", ssh_pass,
+                "ssh",
+                "-p", str(ssh_port),
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "UserKnownHostsFile=/dev/null",
+                "-o", "ConnectTimeout=15",
+                "-o", "LogLevel=ERROR",
+                "-o", "KexAlgorithms=+diffie-hellman-group1-sha1,diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha1",
+                "-o", "HostKeyAlgorithms=+ssh-rsa",
+                "-o", "Ciphers=+aes128-cbc,aes192-cbc,aes256-cbc",
+                f"{ssh_user}@{ssh_host}",
+            ]
+            result = subprocess.run(
+                ssh_opts,
+                input="terminal length 0\nshow env temperature\nshow environment temperature\n",
+                capture_output=True,
+                timeout=timeout,
+                text=True,
+            )
 
-    try:
-        ssh_opts = [
-            "sshpass", "-p", ssh_pass,
-            "ssh",
-            "-p", str(ssh_port),
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "ConnectTimeout=15",
-            "-o", "LogLevel=ERROR",
-            "-o", "KexAlgorithms=+diffie-hellman-group1-sha1,diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha1",
-            "-o", "HostKeyAlgorithms=+ssh-rsa",
-            "-o", "Ciphers=+aes128-cbc,aes192-cbc,aes256-cbc",
-            f"{ssh_user}@{ssh_host}",
-        ]
-        result = subprocess.run(
-            ssh_opts,
-            input="terminal length 0\nshow environment temperature\n",
-            capture_output=True,
-            timeout=timeout,
-            text=True,
-        )
+            if result.returncode not in (0, 1, 255):
+                return UNKNOWN, "SSH authentication failed (rc=%d)" % result.returncode
 
-        if result.returncode == 3:
-            return UNKNOWN, "SSH authentication failed"
-        elif result.returncode != 0:
-            stderr_msg = result.stderr.strip() if result.stderr else "no stderr"
-            return UNKNOWN, "SSH connection failed (exit code %d): %s" % (result.returncode, stderr_msg)
+            text = result.stdout
 
-        text = result.stdout
+            for line in text.split("\n"):
+                stripped = line.strip().replace("\r", "").replace('"', "")
+                if "% Invalid" in stripped or "% Incomplete" in stripped:
+                    continue
+                m = __import__("re").search(
+                    r"(?:temperature\s+is|system\s+temp(?:erature)?|temp(?:erature)?)\s*:?\s*([0-9]+(?:\.[0-9]+)?)",
+                    stripped, __import__("re").IGNORECASE,
+                )
+                if m:
+                    try:
+                        temp_c = float(m.group(1))
+                        break
+                    except ValueError:
+                        pass
 
-    except FileNotFoundError:
-        return UNKNOWN, "sshpass not installed (apt install sshpass)"
-    except subprocess.TimeoutExpired:
-        return UNKNOWN, "SSH connection timed out"
-    except Exception as e:
-        return UNKNOWN, "SSH error: %s" % str(e)
+            if temp_c is not None:
+                return _format_temp_result(temp_c, warn, crit)
 
-    # Parse system temperature from "show environment temperature" output
-    lines = text.split("\n")
-    temp_c = None
+        except FileNotFoundError:
+            pass
+        except subprocess.TimeoutExpired:
+            pass
+        except Exception:
+            pass
 
-    for line in lines:
-        stripped = line.strip().replace("\r", "")
-        m = __import__("re").search(r"(?:temperature\s+is|temp(?:erature)?)\s*:?\s*([0-9]+)", stripped, __import__("re").IGNORECASE)
-        if m:
-            try:
-                temp_c = float(m.group(1))
-                break
-            except ValueError:
-                pass
+    return _fallback_snmp_temp(host, community, version, timeout, warn, crit)
 
-    if temp_c is None:
-        return UNKNOWN, "Cannot parse system temperature from CLI output (raw: %s)" % text[:200].replace("\n", " | ")
 
+def _format_temp_result(temp_c, warn, crit):
     overall_status = OK
     if crit is not None and temp_c >= float(crit):
         overall_status = CRITICAL
     elif warn is not None and temp_c >= float(warn):
         overall_status = WARNING
-
-    STATUS_LABELS = {0: "OK", 1: "WARNING", 2: "CRITICAL", 3: "UNKNOWN"}
     message = "System Temp: %.1fC" % temp_c
     message += " | temp=%.1f;%s;%s" % (temp_c, warn or "", crit or "")
     return overall_status, message
+
+
+def _fallback_snmp_temp(host, community, version, timeout, warn, crit):
+    """SNMP fallback for system temperature - tries CPU temp + envmon scalar."""
+    tried = []
+    temp_c = None
+
+    tried.append("cpu-mib")
+    code, vals = snmp_walk(host, "1.3.6.1.4.1.9.9.109.1.1.1.1.7", community, version, timeout)
+    if code == OK and vals:
+        for idx, val in vals:
+            try:
+                tc = float(val) / 1000.0
+                if 0 < tc < 200:
+                    temp_c = tc
+                    break
+            except (ValueError, TypeError):
+                pass
+
+    if temp_c is None:
+        tried.append("envmon-scalar")
+        code, val = snmp_get(host, CISCO_OIDS["temp_value"], community, version, timeout)
+        if code == OK:
+            try:
+                raw = float(val)
+                tc = raw / 1000.0 if raw > 1000 else raw
+                if 0 < tc < 200:
+                    temp_c = tc
+            except (ValueError, TypeError):
+                pass
+
+    if temp_c is None:
+        tried.append("envmon-alarm")
+        code, val = snmp_get(host, CISCO_OIDS["temp_alarm"], community, version, timeout)
+        if code == OK:
+            tried.append("alarm=%s" % val)
+
+    if temp_c is None:
+        return UNKNOWN, "No temperature data from SSH or SNMP (tried: ssh-cli, %s)" % ", ".join(tried)
+
+    return _format_temp_result(temp_c, warn, crit)
 
 
 def check_fan(host, community, version, timeout):

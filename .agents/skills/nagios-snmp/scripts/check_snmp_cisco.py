@@ -276,13 +276,22 @@ def check_temperature_status(host, community, version, timeout, warn=None, crit=
 
 
 def _parse_transceiver_temp(text):
-    """Parse 'show interfaces transceiver detail' output for port temperatures."""
+    """Parse 'show interfaces transceiver detail' output — Temperature section only."""
     import re
     transceivers = []
+    in_temp = False
 
     for line in text.split("\n"):
         stripped = line.strip().replace("\r", "")
-        if not stripped or stripped.startswith("-") or "Temp" in stripped or "Port" in stripped:
+        if "Temp (Celsius)" in stripped:
+            in_temp = True
+            continue
+        if in_temp and ("Volt" in stripped or "Current" in stripped or "Power" in stripped):
+            in_temp = False
+            continue
+        if not in_temp:
+            continue
+        if not stripped or stripped.startswith("-") or "Port" in stripped:
             continue
         m = re.match(r"(Gi\S+)\s+([0-9.]+)\s+", stripped)
         if m:

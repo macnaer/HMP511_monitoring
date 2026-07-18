@@ -135,9 +135,8 @@ rm -f "$SSH_ERR"
 #   Gi0/45  -7.4      1.0         0.0        -26.0      -27.0
 # Columns: port, value, high_alarm, high_warn, low_warn, low_alarm
 RX_LINE=$(printf '%s\n' "$OUTPUT" | awk '
-    /^Receive Power / { hdr = 1 }
-    hdr && /^Port / && /\(dBm\)/ { unit = 1 }
-    hdr && unit && $1 == "'"$PORT"'" && $2 ~ /^-?[0-9]/ { print; exit }
+    /Receive Power/ { in_rx = 1 }
+    in_rx && $1 == "'"$PORT"'" { print; exit }
 ')
 
 if [ -z "$RX_LINE" ]; then

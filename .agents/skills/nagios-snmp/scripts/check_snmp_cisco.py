@@ -208,12 +208,12 @@ def check_temperature(host, community, version, timeout, warn, crit):
         return UNKNOWN, "Invalid temperature value: %s" % value
 
 
-def check_temperature_status(host, community, version, timeout):
-    """Check transceiver temperature via SSH and show real Celsius values.
+def check_temperature_status(host, community, version, timeout, warn=None, crit=None):
+    """Check system temperature via SSH and show real Celsius values.
 
-    Connects to the switch via sshpass+SSH, runs 'show interfaces transceiver detail',
-    parses temperature/power values, and reports them with Nagios thresholds.
-    Uses sshpass + subprocess to avoid paramiko kex compatibility issues with old Cisco IOS.
+    Connects to the switch via sshpass+SSH, runs 'show environment temperature',
+    parses system temperature, and reports with Nagios thresholds.
+    Uses sshpass + subprocess with legacy Kex/Ciphers/HostKeyAlgs for old Cisco IOS.
     """
     import subprocess
 
@@ -238,17 +238,22 @@ def check_temperature_status(host, community, version, timeout):
         return UNKNOWN, "SSH credentials not found in .env"
 
     try:
+        ssh_opts = [
+            "sshpass", "-p", ssh_pass,
+            "ssh",
+            "-p", str(ssh_port),
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null",
+            "-o", "ConnectTimeout=15",
+            "-o", "LogLevel=ERROR",
+            "-o", "KexAlgorithms=+diffie-hellman-group1-sha1,diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha1",
+            "-o", "HostKeyAlgorithms=+ssh-rsa",
+            "-o", "Ciphers=+aes128-cbc,aes192-cbc,aes256-cbc",
+            f"{ssh_user}@{ssh_host}",
+        ]
         result = subprocess.run(
-            [
-                "sshpass", "-p", ssh_pass,
-                "ssh",
-                "-p", str(ssh_port),
-                "-o", "StrictHostKeyChecking=no",
-                "-o", "UserKnownHostsFile=/dev/null",
-                "-o", "LogLevel=ERROR",
-                f"{ssh_user}@{ssh_host}",
-            ],
-            input="terminal length 0\nshow interfaces transceiver detail\n",
+            ssh_opts,
+            input="terminal length 0\nshow environment temperature\n",
             capture_output=True,
             timeout=timeout,
             text=True,
@@ -269,66 +274,33 @@ def check_temperature_status(host, community, version, timeout):
     except Exception as e:
         return UNKNOWN, "SSH error: %s" % str(e)
 
-    # Parse section-by-section to only get Temperature (Celsius), not Voltage/power
-    transceivers = []
+    # Parse system temperature from "show environment temperature" output
     lines = text.split("\n")
-    in_temp_section = False
-    found_header = False
+    temp_c = None
 
     for line in lines:
         stripped = line.strip().replace("\r", "")
-        if "Temperature" in stripped:
-            found_header = True
-            continue
-        if found_header and "Celsius" in stripped:
-            in_temp_section = True
-            found_header = False
-            continue
-        if in_temp_section and "---" in stripped:
-            continue
-        if in_temp_section and stripped.startswith("Gi"):
-            parts = stripped.split()
-            if len(parts) >= 2:
-                try:
-                    port = parts[0]
-                    temp_c = float(parts[1])
-                    alarm_high = float(parts[2]) if len(parts) > 2 else 85.0
-                    warn_high = float(parts[3]) if len(parts) > 3 else 80.0
-                    transceivers.append((port, temp_c, alarm_high, warn_high))
-                except (ValueError, IndexError):
-                    pass
-        elif in_temp_section and stripped and not stripped.startswith("Gi"):
-            in_temp_section = False
-            found_header = False
+        m = __import__("re").search(r"(?:temperature\s+is|temp(?:erature)?)\s*:?\s*([0-9]+)", stripped, __import__("re").IGNORECASE)
+        if m:
+            try:
+                temp_c = float(m.group(1))
+                break
+            except ValueError:
+                pass
 
-    if not transceivers:
-        return UNKNOWN, "Cannot parse transceiver temperature from CLI output"
+    if temp_c is None:
+        return UNKNOWN, "Cannot parse system temperature from CLI output (raw: %s)" % text[:200].replace("\n", " | ")
 
-    # Build Nagios perfdata with thresholds from device
     overall_status = OK
-    parts = []
-    perfdata_parts = []
-
-    for port, temp_c, alarm_high, warn_high in transceivers:
-        port_status = OK
-
-        if temp_c >= alarm_high:
-            port_status = CRITICAL
-        elif temp_c >= warn_high:
-            port_status = WARNING
-
-        parts.append("%s: %.1fC" % (port, temp_c))
-        perfdata_parts.append("%s=%.1f;%s;%s" % (port.replace("/", "_"), temp_c, warn_high, alarm_high))
-
-        if port_status > overall_status:
-            overall_status = port_status
-
-    message = ", ".join(parts)
-    if perfdata_parts:
-        message += " | " + " ".join(perfdata_parts)
+    if crit is not None and temp_c >= float(crit):
+        overall_status = CRITICAL
+    elif warn is not None and temp_c >= float(warn):
+        overall_status = WARNING
 
     STATUS_LABELS = {0: "OK", 1: "WARNING", 2: "CRITICAL", 3: "UNKNOWN"}
-    return overall_status, "Transceiver temp: %s" % message
+    message = "System Temp: %.1fC" % temp_c
+    message += " | temp=%.1f;%s;%s" % (temp_c, warn or "", crit or "")
+    return overall_status, message
 
 
 def check_fan(host, community, version, timeout):
@@ -543,7 +515,7 @@ def main():
     try:
         checks = {
             "temperature": lambda: check_temperature(args.host, args.community, args.version, args.timeout, args.warn, args.crit),
-            "temperature_status": lambda: check_temperature_status(args.host, args.community, args.version, args.timeout),
+            "temperature_status": lambda: check_temperature_status(args.host, args.community, args.version, args.timeout, args.warn, args.crit),
             "fan": lambda: check_fan(args.host, args.community, args.version, args.timeout),
             "psu": lambda: check_psu(args.host, args.community, args.version, args.timeout),
             "storage": lambda: check_storage(args.host, args.community, args.version, args.timeout, args.warn, args.crit),

@@ -209,12 +209,14 @@ def check_temperature(host, community, version, timeout, warn, crit):
 
 
 def check_temperature_status(host, community, version, timeout, warn=None, crit=None):
-    """Check system temperature via SSH (primary) + SNMP (fallback).
+    """Check switch temperature via SSH (SFP transceivers) + SNMP fallback.
 
     SSH connects via sshpass with legacy Kex/Ciphers/HostKeyAlgs for old Cisco IOS,
-    tries multiple CLI commands to get system temperature, then falls back to SNMP.
+    runs 'show interfaces transceiver detail', parses all SFP port temperatures.
+    Falls back to SNMP CPU/environment temperature OIDs if SSH fails.
     """
     import subprocess
+    import re
 
     env = {}
     env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..", ".env")
@@ -249,7 +251,7 @@ def check_temperature_status(host, community, version, timeout, warn=None, crit=
             ]
             result = subprocess.run(
                 ssh_opts,
-                input="terminal length 0\nshow env temperature\nshow environment temperature\n",
+                input="terminal length 0\nshow interfaces transceiver detail\n",
                 capture_output=True,
                 timeout=timeout,
                 text=True,
@@ -259,24 +261,9 @@ def check_temperature_status(host, community, version, timeout, warn=None, crit=
                 return UNKNOWN, "SSH authentication failed (rc=%d)" % result.returncode
 
             text = result.stdout
-
-            for line in text.split("\n"):
-                stripped = line.strip().replace("\r", "").replace('"', "")
-                if "% Invalid" in stripped or "% Incomplete" in stripped:
-                    continue
-                m = __import__("re").search(
-                    r"(?:temperature\s+is|system\s+temp(?:erature)?|temp(?:erature)?)\s*:?\s*([0-9]+(?:\.[0-9]+)?)",
-                    stripped, __import__("re").IGNORECASE,
-                )
-                if m:
-                    try:
-                        temp_c = float(m.group(1))
-                        break
-                    except ValueError:
-                        pass
-
-            if temp_c is not None:
-                return _format_temp_result(temp_c, warn, crit)
+            transceivers = _parse_transceiver_temp(text)
+            if transceivers:
+                return _format_transceiver_result(transceivers, warn, crit)
 
         except FileNotFoundError:
             pass
@@ -288,14 +275,45 @@ def check_temperature_status(host, community, version, timeout, warn=None, crit=
     return _fallback_snmp_temp(host, community, version, timeout, warn, crit)
 
 
-def _format_temp_result(temp_c, warn, crit):
+def _parse_transceiver_temp(text):
+    """Parse 'show interfaces transceiver detail' output for port temperatures."""
+    import re
+    transceivers = []
+
+    for line in text.split("\n"):
+        stripped = line.strip().replace("\r", "")
+        if not stripped or stripped.startswith("-") or "Temp" in stripped or "Port" in stripped:
+            continue
+        m = re.match(r"(Gi\S+)\s+([0-9.]+)\s+", stripped)
+        if m:
+            port = m.group(1)
+            try:
+                temp_c = float(m.group(2))
+                if 1.0 <= temp_c <= 200.0:
+                    transceivers.append((port, temp_c))
+            except ValueError:
+                pass
+
+    return transceivers
+
+
+def _format_transceiver_result(transceivers, warn, crit):
+    """Build Nagios output from parsed transceiver temperature data."""
+    all_temps = [t[1] for t in transceivers]
+    max_temp = max(all_temps)
+    max_port = [p for p, t in transceivers if t == max_temp][0]
+
     overall_status = OK
-    if crit is not None and temp_c >= float(crit):
+    if crit is not None and max_temp >= float(crit):
         overall_status = CRITICAL
-    elif warn is not None and temp_c >= float(warn):
+    elif warn is not None and max_temp >= float(warn):
         overall_status = WARNING
-    message = "System Temp: %.1fC" % temp_c
-    message += " | temp=%.1f;%s;%s" % (temp_c, warn or "", crit or "")
+
+    ports_summary = ", ".join("%s:%.1fC" % (p, t) for p, t in transceivers)
+    message = "SFP Temp: %.1fC (hot: %s)" % (max_temp, max_port)
+    message += " [%s]" % ports_summary
+    message += " | sfp_temp=%.1f;%s;%s" % (max_temp, warn or "", crit or "")
+
     return overall_status, message
 
 
@@ -329,15 +347,16 @@ def _fallback_snmp_temp(host, community, version, timeout, warn, crit):
                 pass
 
     if temp_c is None:
-        tried.append("envmon-alarm")
-        code, val = snmp_get(host, CISCO_OIDS["temp_alarm"], community, version, timeout)
-        if code == OK:
-            tried.append("alarm=%s" % val)
-
-    if temp_c is None:
         return UNKNOWN, "No temperature data from SSH or SNMP (tried: ssh-cli, %s)" % ", ".join(tried)
 
-    return _format_temp_result(temp_c, warn, crit)
+    overall_status = OK
+    if crit is not None and temp_c >= float(crit):
+        overall_status = CRITICAL
+    elif warn is not None and temp_c >= float(warn):
+        overall_status = WARNING
+    message = "System Temp: %.1fC" % temp_c
+    message += " | temp=%.1f;%s;%s" % (temp_c, warn or "", crit or "")
+    return overall_status, message
 
 
 def check_fan(host, community, version, timeout):

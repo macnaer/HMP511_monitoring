@@ -141,10 +141,7 @@ RX_LINE=$(printf '%s\n' "$OUTPUT" | awk '
 ')
 
 if [ -z "$RX_LINE" ]; then
-    echo "UNKNOWN - Could not parse Receive Power data for $PORT on $HOST"
-    echo "---BEGIN RAW OUTPUT---"
-    printf '%s\n' "$OUTPUT" | tail -40
-    echo "---END RAW OUTPUT---"
+    echo "UNKNOWN - Could not parse Receive Power data on $HOST"
     exit $UNKNOWN
 fi
 
@@ -194,5 +191,5 @@ fi
 
 PERFDATA="rxpower=$RX_VALUE;$LOW_WARN;$LOW_ALARM;$HIGH_WARN;$HIGH_ALARM"
 
-echo "$STATUS_TEXT - Rx Power $RX_VALUE dBm on $PORT (low: ${LOW_ALARM}/${LOW_WARN}, high: ${HIGH_WARN}/${HIGH_ALARM}) | $PERFDATA"
+echo "$STATUS_TEXT - Rx Power $RX_VALUE dBm | $PERFDATA"
 exit $STATUS
